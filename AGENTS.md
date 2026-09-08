@@ -62,6 +62,8 @@ src/sarcos_svd/
   lowrank.py     # SVD truncation: leading / middle / trailing
   evaluate.py    # MSE + retained-energy reporting
   report.py      # aggregate sweeps over seeds into the README table
+  note.py        # writes notes/results.qmd from the artifacts (Quarto presentation)
+notes/           # results.qmd (source, tracked) + results.html (rendered, ignored)
 results/         # per-run JSON/CSV summaries, git-ignored
 tests/           # stdlib unittest invariants for bands, truncation, splitting
 README.md        # human-readable summary; results table lives here

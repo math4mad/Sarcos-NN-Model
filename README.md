@@ -93,6 +93,12 @@ done
 python -m sarcos_svd.report --layer all --markdown
 python -m sarcos_svd.report --layer 2 --markdown
 python -m unittest discover -s tests        # band/truncation/split invariants
+
+# the Quarto presentation note: tables are built from the artifacts at render time,
+# so the note cannot drift from the runs. Extras: pip install -e ".[note]"
+pip install -r requirements-note.txt        # pandas, great_tables, ipykernel, …
+python -m sarcos_svd.note                   # writes notes/results.qmd
+quarto render notes/results.qmd             # -> notes/results.html (self-contained)
 ```
 
 Everything that moves a result (`--seed`, `--block-size`, `--fractions`,
@@ -101,6 +107,11 @@ run records in `results/runs/<run_id>/run.json` capture config, split manifest,
 per-epoch history, per-joint MSE, weight spectra and environment.
 
 ## Results
+
+The human-facing rendering is the Quarto note: `notes/results.qmd` (source, kept in
+git) → `notes/results.html` (rendered, git-ignored, self-contained). Its tables are
+built from `results/summary.json` and the run records at render time, so they cannot
+disagree with the numbers below; this section is the compact version.
 
 Primary metric is **test MSE normalised per joint**: `mean_j MSE_j / var_train_j`,
 so 1.0 = "no better than predicting the train mean" and no joint can hide behind
@@ -286,8 +297,10 @@ Phase 3 done: the scaffold and the first study are committed (`cda705b`), and th
 headline result — **the leading singular band carries the learning effect; middle
 and trailing are indistinguishable and both fatal; retained energy does not
 predict function** — now rests on 5 architectures × 3 seeds rather than one net.
-`data/` and `results/` stay git-ignored, so a clean checkout needs
-`python -m sarcos_svd.data --fetch`.
+The same numbers are presented as a rendered Quarto note (`python -m sarcos_svd.note
+&& quarto render notes/results.qmd`), whose tables are generated from the run
+artifacts rather than typed by hand. `data/` and `results/` stay git-ignored, so a
+clean checkout needs `python -m sarcos_svd.data --fetch`.
 
 Still open: the layer-2 middle-band inversion (only 7 directions to work with, so
 energy matching is coarse — needs a dedicated run with more seeds and a wider

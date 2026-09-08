@@ -8,3 +8,14 @@ __pycache__/
 .DS_Store
 
 *.egg-info/
+
+# rendered presentation note
+notes/_quarto/
+.quarto/
+
+/.quarto/
+**/*.quarto_ipynb
+
+# rendered presentation note (regenerate: python -m sarcos_svd.note && quarto render notes/results.qmd)
+notes/results.html
+.quarto/

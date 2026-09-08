@@ -9,5 +9,11 @@ description = "SVD probe of what a small MLP learns on the SARCOS robot-arm inve
 requires-python = ">=3.10"
 dependencies = ["numpy", "scipy", "torch", "matplotlib"]
 
+[project.optional-dependencies]
+# Everything needed to build and render notes/results.qmd. The study itself does
+# not need any of it; see requirements-note.txt for the pinned list.
+note = ["pandas", "great_tables", "ipykernel", "jupyter-core", "jupyter-client",
+        "nbformat", "nbconvert", "pyyaml"]
+
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1,0 +1,13 @@
+# Presentation-note extras: everything needed to build and render notes/results.qmd.
+# The study itself only needs requirements.txt; these are deliberately separate.
+great_tables==0.24.0
+pandas==3.0.5
+ipykernel
+jupyter-core
+jupyter-client
+nbformat
+nbconvert
+pyyaml
+
+# Rendering also needs the Quarto CLI (not installable via pip):
+#   quarto --version   -> 1.10.18 on this host
