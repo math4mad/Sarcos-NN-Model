@@ -13,6 +13,10 @@ license = "MIT OR Apache-2.0"
 license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
 dependencies = ["numpy", "scipy", "torch", "matplotlib"]
 
+[project.urls]
+Source = "https://github.com/math4mad/Sarcos-NN-Model"
+Documentation = "https://math4mad.github.io/Sarcos-NN-Model/"
+
 [project.optional-dependencies]
 # Everything needed to build and render notes/results.qmd. The study itself does
 # not need any of it; see requirements-note.txt for the pinned list.

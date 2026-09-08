@@ -156,12 +156,18 @@ def main(argv: list[str] | None = None) -> None:
         run(["git", "push", "--force-with-lease", "origin", args.branch])
     else:
         source = git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
+        remote = git("remote", "get-url", "origin", check=False)
         print("\nto publish:")
-        print(f"  1. create the repo if needed, then:  git remote add origin git@github.com:<user>/<repo>.git")
-        print(f"  2. git push -u origin {source} {args.branch}")
-        print(f"  3. GitHub → Settings → Pages → Source: Deploy from a branch → "
+        if remote.returncode != 0:
+            print("  0. no `origin` remote yet - add one:  git remote add origin "
+                  "https://github.com/<user>/<repo>.git")
+        else:
+            print(f"  origin: {remote.stdout.strip()}")
+        print(f"  1. git push -u origin {source} {args.branch}")
+        print(f"  2. GitHub → Settings → Pages → Source: Deploy from a branch → "
               f"branch `{args.branch}` / `/ (root)`")
-        print("  (or re-run this module with --push once the remote exists)")
+        print("  (or re-run this module with --push; --push uses --force-with-lease "
+              "on the site branch, never on your source branch)")
 
 
 if __name__ == "__main__":

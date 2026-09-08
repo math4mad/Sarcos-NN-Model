@@ -401,8 +401,14 @@ seeded, CPU-deterministic ones rather than a fresh run on a different machine. I
 stages the site through a scratch `git worktree`, so your working branch is never
 switched and generated HTML/PNG never lands next to the code.
 
-Then: `git push -u origin <branch> gh-pages`, and in GitHub → Settings → Pages
-choose **Deploy from a branch → `gh-pages` / `/ (root)`**.
+Then push and switch Pages on:
+
+```bash
+git push -u origin main gh-pages
+# GitHub → Settings → Pages → Source: Deploy from a branch → gh-pages / (root)
+```
+
+Live site: <https://math4mad.github.io/Sarcos-NN-Model/>
 
 ## License
 

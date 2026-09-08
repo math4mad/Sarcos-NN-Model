@@ -9,6 +9,11 @@ project:
 
 website:
   title: "SARCOS × SVD"
+  # GitHub Pages project sites are served under /<repo>/, so every absolute link
+  # has to be prefixed; without this the stylesheet and figure paths 404.
+  site-url: https://math4mad.github.io/Sarcos-NN-Model/
+  repo-url: https://github.com/math4mad/Sarcos-NN-Model
+  repo-branch: gh-pages
   navbar:
     left:
       - href: index.qmd
@@ -17,14 +22,10 @@ website:
         text: Results note
     right:
       - icon: github
-        href: https://github.com/math4mad
+        href: https://github.com/math4mad/Sarcos-NN-Model
   page-footer:
     left: "© 2026 math4mad — dual-licensed MIT OR Apache-2.0"
     right: "SARCOS data © Rasmussen & Williams; not redistributed here."
-  repo-url: https://github.com/math4mad/Sarcos-NN-Model
-
-# Document-level licence metadata lives in pyproject.toml / LICENSE-* files;
-# quarto's `website:` key has no `license` field.
 
 format:
   html:
