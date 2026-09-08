@@ -260,6 +260,95 @@ def iso_energy_rows(
     return rows
 
 
+def init_state_of(run: dict, run_path: Path) -> tuple[dict[str, np.ndarray], str]:
+    """The W_init that a trained state should be differenced against.
+
+    Preferred: the `weights_init.npz` written next to the weights. If the run
+    predates that, the init is rebuilt from the recorded seed — the same code path
+    the trainer used, and the whole pipeline is bit-deterministic, so this is exact
+    rather than approximate. `delta_over_base_fro` in the rows is the sanity check:
+    a wrong init would make the increment look like an unrelated matrix (ratio ~1).
+    """
+    name = run.get("artifacts", {}).get("weights_init", "weights_init.npz")
+    path = run_path.parent / name
+    if path.exists():
+        weights = np.load(path)
+        return {k: weights[k] for k in weights.files}, "stored"
+    model = model_from_config(config_of(run), run["seed"])
+    state = {k: v.cpu().numpy() for k, v in model.state_dict().items()}
+    np.savez(path, **{k: v.astype(np.float32) for k, v in state.items()})
+    return state, "regenerated-from-seed"
+
+
+def delta_sweep(
+    run: dict,
+    run_path: Path,
+    ranks: list[int],
+    bands: list[str],
+    layers: list[int] | None = None,
+) -> list[dict]:
+    """LoRA's object, post-hoc: truncate ΔW = W_trained − W_init by band, add it back.
+
+    Energy here is relative to ‖ΔW‖², not ‖W‖² — a rank-r slice of the increment is a
+    different claim from a rank-r slice of the matrix.
+    """
+    cfg = config_of(run)
+    trained = state_of(run, run_path)
+    init, provenance = init_state_of(run, run_path)
+    tensors = load_tensors(run)
+    weight_names = [k for k in trained if k.endswith(".weight")]
+    targets: list[int | None] = [None] if layers is None else [int(i) for i in layers]
+    rows = []
+    for chosen in targets:
+        for band in bands:
+            for r in ranks:
+                if chosen is None:
+                    caps = {k: min(r, min(trained[k].shape)) for k in weight_names}
+                else:
+                    name = weight_names[chosen]
+                    caps = {
+                        k: (min(r, min(trained[k].shape)) if k == name else min(trained[k].shape))
+                        for k in weight_names
+                    }
+                trunc, summary = lowrank.truncate_state_delta(trained, init, caps, band)
+                scores = score_state(cfg, trunc, tensors, run["seed"])
+                rows.append(
+                    {
+                        "regime": "post-hoc-delta-truncation",
+                        "layer": "all" if chosen is None else int(chosen),
+                        "band": band,
+                        "rank_rung": r,
+                        "init_provenance": provenance,
+                        "effective_ranks": summary["effective_ranks"],
+                        "retained_energy_global": summary["delta_retained_energy_global"],
+                        "retained_energy_per_layer": {
+                            k: v["delta_retained_energy"] for k, v in summary["per_layer"].items()
+                        },
+                        "delta_over_base_fro": {
+                            k: v["delta_over_base_fro"] for k, v in summary["per_layer"].items()
+                        },
+                        "mse_val": scores["val"]["mse_normalized"],
+                        "mse_test": scores["test"]["mse_normalized"],
+                        "mse_raw_mean_test": scores["test"]["mse_raw_mean"],
+                        "mse_per_joint_raw_test": scores["test"]["mse_per_joint_raw"],
+                        "delta_vs_fullrank_test": round(
+                            scores["test"]["mse_normalized"] - run["metrics"]["test"]["mse_normalized"], 6
+                        ),
+                    }
+                )
+    return rows
+
+
+def delta_spectra(run: dict, run_path: Path) -> dict:
+    """Is the learned deviation low-rank at all? The premise LoRA borrows, measured."""
+    trained = state_of(run, run_path)
+    init, provenance = init_state_of(run, run_path)
+    out = {"run_id": run["run_id"], "init_provenance": provenance, "layers": {}}
+    for name in [k for k in trained if k.endswith(".weight")]:
+        out["layers"][name] = lowrank.delta_spectrum(trained[name], init[name])
+    return out
+
+
 def format_table(rows: list[dict], cols: list[str]) -> str:
     widths = {c: max(len(c), *(len(str(r.get(c, ""))) for r in rows)) if rows else len(c) for c in cols}
     lines = ["  ".join(c.ljust(widths[c]) for c in cols), "  ".join("-" * widths[c] for c in cols)]
@@ -316,6 +405,8 @@ def main() -> None:
     g.add_argument("--sweep", help="comma list of per-layer rank rungs, e.g. 1,2,4,8,16,32")
     g.add_argument("--iso-energy", help="comma list of target global retained energies, e.g. 0.9,0.5,0.1")
     g.add_argument("--single", nargs=2, metavar=("BAND", "RANK"), help="evaluate one truncation")
+    g.add_argument("--delta-sweep", help="same ladder, on dW = W_trained - W_init (LoRA's object)")
+    g.add_argument("--delta-spectra", action="store_true", help="report the rank/energy profile of dW and exit")
     g.add_argument("--baseline", action="store_true", help="re-score the untruncated run (sanity check)")
     p.add_argument("--bands", default=",".join(lowrank.BANDS), help="comma list subset of leading,middle,trailing")
     p.add_argument(
@@ -352,9 +443,19 @@ def main() -> None:
         print(f"re-score matches the training-time record: {same}")
         return
 
+    if args.delta_spectra:
+        spec = delta_spectra(run, run_path)
+        print(json.dumps(spec, indent=2))
+        (run_path.parent / "delta_spectra.json").write_text(json.dumps(spec, indent=2))
+        return
+
     if args.single:
         band, rank = args.single[0], int(args.single[1])
         rows = truncation_sweep(run, run_path, [rank], [band], layers=layers)
+    elif args.delta_sweep:
+        ranks = [int(x) for x in args.delta_sweep.split(",") if x.strip()]
+        rows = delta_sweep(run, run_path, ranks, bands, layers=layers)
+        layer_tag = "delta-" + layer_tag
     elif args.sweep:
         ranks = [int(x) for x in args.sweep.split(",") if x.strip()]
         rows = truncation_sweep(run, run_path, ranks, bands, layers=layers)
@@ -382,7 +483,7 @@ def main() -> None:
     if args.out:
         out_path = Path(args.out)
     else:
-        legs = args.sweep or args.iso_energy or f"{args.single[1]}"
+        legs = args.sweep or args.iso_energy or args.delta_sweep or f"{args.single[1]}"
         out_path = run_path.parent / f"truncation_L{layer_tag}_{'_'.join(legs.split(','))}.json"
     out_path.write_text(json.dumps({"run_id": run["run_id"], "rows": rows}, indent=2))
     print(f"\nwrote {out_path}")

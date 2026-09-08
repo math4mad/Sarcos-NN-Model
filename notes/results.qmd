@@ -16,6 +16,8 @@ warning: false
 from __future__ import annotations
 
 import json
+import statistics
+from collections import defaultdict
 from pathlib import Path
 
 import pandas as pd
@@ -342,6 +344,66 @@ sel_df = pd.DataFrame(sel_rows).sort_values("val MSE (norm.)")
 gt(sel_df, caption="Validation orders the candidates monotonically by capacity — nothing overfits at this scale — so the largest cheaply-affordable net wins. The decision itself used seeds 13–15, the same three for every row; the winner is shown with all 8 seeds because it was run further for the follow-up above. The band conclusions are unchanged by the choice; the seed spread at the selected model is test 0.0161, sd 0.0021, range 0.0133–0.0196 over 8 seeds.") \
     .fmt_number(columns=["val MSE (norm.)", "test MSE (norm.)"], decimals=5) \
     .fmt_number(columns=["params"], decimals=0, use_seps=True)
+```
+
+# The third regime: LoRA, and the increment
+
+LoRA's object is the same rank-`r` factorisation, applied to the **update**: $W_{\\text{final}} = W_{\\text{frozen}} + BA$. That makes three regimes, and the reason it is worth separating them is in the first table.
+
+```{python}
+sel_arch = "21-256-256-7"
+base_sel = one("full-rank baseline (trained)", arch=sel_arch)
+fft = one("trained-full-finetune", arch=sel_arch)
+reg_rows = []
+for rung in ("1/1/1", "4/4/4", "16/16/7", "21/21/7"):
+    r_num = int(rung.split("/")[0])
+    rep = pick("trained-under-rank-constraint", arch=sel_arch, rung=rung)
+    lor = pick("trained-lora-increment", arch=sel_arch, rung=rung)
+    dele = pick("post-hoc-truncation", arch=sel_arch, band="leading", rung=r_num)
+    reg_rows.append({
+        "rank": rung,
+        "post-hoc deletion of W": dele[0]["mse_test_mean"] if dele else None,
+        "trained as W = UV (replacement)": rep[0]["mse_test_mean"] if rep else None,
+        "trained as W_frozen + dW (LoRA)": lor[0]["mse_test_mean"] if lor else None,
+    })
+reg_rows.append({"rank": "full rank",
+                 "post-hoc deletion of W": base_sel["mse_test_mean"],
+                 "trained as W = UV (replacement)": base_sel["mse_test_mean"],
+                 "trained as W_frozen + dW (LoRA)": fft["mse_test_mean"]})
+gt(pd.DataFrame(reg_rows), caption=f"Test normalised MSE on the selected model, mean of 3 seeds. Deletion and replacement fit the train blocks; the LoRA arm starts from the converged base and fits the val blocks (the adapter setting), so its comparison points are the frozen base ({base_sel['mse_test_mean']:.4f}) and full fine-tuning ({fft['mse_test_mean']:.4f}), not the from-scratch rows. Reading: adding a rank-1 channel costs about 2x relative MSE, while deleting everything but a rank-1 slice costs about 60x. Low rank as an addition is far gentler than low rank as a constraint - that is the honest reason LoRA works, and it is not 'the update is compressible'.") \
+    .fmt_number(columns=["post-hoc deletion of W", "trained as W = UV (replacement)", "trained as W_frozen + dW (LoRA)"], decimals=4)
+```
+
+```{python}
+specs = defaultdict(list)
+for path in sorted((RES / "runs").glob("full-256h256-seed*/delta_spectra.json")):
+    for k, v in json.loads(path.read_text())["layers"].items():
+        specs[k].append(v)
+gt(pd.DataFrame([
+    {"layer": k.replace("layers.", "").replace(".weight", ""),
+     "shape": f"{v[0]['shape'][0]}x{v[0]['shape'][1]}",
+     "norm dW / norm W_init": round(statistics.fmean(x["delta_over_base_fro"] for x in v), 2),
+     "energy in top-1": round(statistics.fmean(x["energy_top1"] for x in v), 3),
+     "rank for 99% of dW energy": round(statistics.fmean(x["rank_at_99pct_energy"] for x in v), 1),
+     "full rank": min(v[0]["shape"])}
+    for k, v in specs.items()
+]), caption="Is the learned deviation low-rank at all? No. The 256x256 layer needs rank 144 of 256 for 99% of its increment energy, and the increment is *bigger* than the initial weights. That is what training from scratch looks like; LoRA's intrinsic-rank evidence comes from fine-tuning, where the update is small compared with the matrix it edits. So this is not a refutation of LoRA - it is a boundary on what this repository can test, and a warning against importing 'the update is low-rank' from these runs.") \
+    .fmt_number(columns=["norm dW / norm W_init", "energy in top-1"], decimals=3)
+```
+
+```{python}
+dw = pd.DataFrame([
+    {
+        "band": b.capitalize(),
+        **{f"rank {rk}": one("post-hoc-delta-truncation", arch=sel_arch, layer="all", band=b, rung=rk)["mse_test_mean"]
+           for rk in (1, 4, 16, 32, 64)},
+        "dW energy kept at r64": one("post-hoc-delta-truncation", arch=sel_arch, layer="all", band=b, rung=64)["energy_mean"],
+    }
+    for b in BANDS
+])
+gt(dw, caption="The same band machinery applied to dW, added back to W_init, 8 seeds. Energy here is relative to dW, not to W - a rank-r slice of the increment is a different claim. The ordering leading >> middle ~ trailing transfers to the increment; the read-out inversion does not. Middle beats leading at rank 2 only at a quarter of the increment energy, and loses clearly at rank 4. Prediction (b) from the previous round - 'if the inversion reappears in dW, it is a statement about where adapters should be initialised' - failed, and that is recorded here rather than quietly dropped.") \
+    .fmt_number(columns=[c for c in dw.columns if c.startswith("rank")], decimals=3) \
+    .fmt_number(columns=["dW energy kept at r64"], decimals=3)
 ```
 
 # Robust across shapes

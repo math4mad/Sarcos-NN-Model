@@ -42,11 +42,15 @@ look right and mean nothing.
    a split between the baseline run and the truncated runs.
 2. **Never tune on test.** Model size, rank `k`, and band boundaries are chosen
    on validation only.
-3. **Keep the two rank regimes distinct.** Post-hoc truncation of a *trained*
-   net (README step 5) is a different experiment from training *under* a rank
-   constraint. Never merge their results into one table row.
+3. **Keep the rank regimes distinct.** Post-hoc truncation of a *trained* net
+   (README step 5), training *under* a rank constraint, and training a LoRA-style
+   *increment* on a frozen base are three different experiments. Never merge their
+   results into one table row, and never compare their numbers without saying which
+   split each arm fitted.
 4. **Always report retained energy** `‖W_r‖²/‖W‖²` next to test MSE. An MSE
-   delta without its energy is uninterpretable.
+   delta without its energy is uninterpretable. For increment studies the same rule
+   applies to `‖ΔW_r‖²/‖ΔW‖²` — and say which of the two it is, because they are
+   different claims.
 5. **Reproducibility beats speed.** Determinism flags and pinned seeds are part
    of every runner, not optional extras.
 6. **Ablations must be single-variable.** Change one band/rank at a time.

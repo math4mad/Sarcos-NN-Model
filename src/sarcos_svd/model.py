@@ -24,20 +24,54 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class LoRAIncrementLinear(nn.Module):
+    """LoRA's parameterisation: ``W_eff = W_frozen + scale · A B``.
+
+    ``A:[out,r]`` random, ``B:[r,in]`` zero, so the increment starts at exactly zero
+    and the frozen base is reproduced at step 0 — that is what makes this a *third*
+    regime rather than a re-run of the replacement one: the capacity that was there
+    is never taken away, it is only ever edited through a rank-``r`` channel.
+
+    ``weight`` exposes the effective matrix so spectra/truncation code works on it
+    unchanged; gradients flow only to A and B (and not to the frozen base or bias).
+    """
+
+    def __init__(self, base: torch.Tensor, rank: int, scale: float = 1.0) -> None:
+        super().__init__()
+        out_features, in_features = int(base.shape[0]), int(base.shape[1])
+        if not 1 <= rank <= min(base.shape):
+            raise ValueError(f"rank {rank} out of range for base {tuple(base.shape)}")
+        self.in_features, self.out_features, self.rank, self.scale = in_features, out_features, rank, float(scale)
+        self.register_buffer("weight_base", base.detach().clone())
+        self.register_buffer("bias_base", torch.zeros(out_features))
+        self.a = nn.Parameter(torch.empty(out_features, rank))
+        self.b = nn.Parameter(torch.empty(rank, in_features))
+        nn.init.kaiming_uniform_(self.a, a=np.sqrt(5))
+        nn.init.zeros_(self.b)
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.weight_base + self.scale * (self.a @ self.b)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return F.linear(x, self.weight, self.bias_base)
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     in_dim: int
     out_dim: int
     hidden: tuple[int, ...] = (64, 64)
-    mode: str = "full"  # "full" | "constrained"
-    ranks: tuple[int, ...] | None = None  # per-layer rank cap, constrained mode only
+    mode: str = "full"  # "full" | "constrained" | "lora"
+    ranks: tuple[int, ...] | None = None  # per-layer rank cap, constrained/lora modes only
+    lora_scale: float = 1.0  # alpha/r style scaling of the increment, lora mode only
 
     def __post_init__(self) -> None:
-        if self.mode not in ("full", "constrained"):
+        if self.mode not in ("full", "constrained", "lora"):
             raise ValueError(f"unknown mode {self.mode!r}")
-        if self.mode == "constrained":
+        if self.mode in ("constrained", "lora"):
             if self.ranks is None:
-                raise ValueError("constrained mode needs explicit per-layer ranks")
+                raise ValueError(f"{self.mode} mode needs explicit per-layer ranks")
             if len(self.ranks) != len(self.layer_shapes):
                 raise ValueError(f"ranks has {len(self.ranks)} entries, expected {len(self.layer_shapes)}")
             for r, shape in zip(self.ranks, self.layer_shapes):
@@ -76,18 +110,23 @@ class LowRankLinear(nn.Module):
         return F.linear(F.linear(x, self.v), self.u, self.bias)
 
 
-def _make_layer(cfg: ModelConfig, index: int) -> nn.Module:
+def _make_layer(cfg: ModelConfig, index: int, base_state: dict[str, torch.Tensor] | None = None) -> nn.Module:
     out, inn = cfg.layer_shapes[index]
+    name = f"layers.{index}.weight"
+    if cfg.mode == "lora":
+        if base_state is None or name not in base_state:
+            raise ValueError("lora mode needs the frozen base weights (base_state)")
+        return LoRAIncrementLinear(base_state[name], int(cfg.ranks[index]), cfg.lora_scale)
     if cfg.mode == "constrained":
         return LowRankLinear(inn, out, int(cfg.ranks[index]))
     return nn.Linear(inn, out)
 
 
 class MLP(nn.Module):
-    def __init__(self, cfg: ModelConfig) -> None:
+    def __init__(self, cfg: ModelConfig, base_state: dict[str, torch.Tensor] | None = None) -> None:
         super().__init__()
         self.cfg = cfg
-        self.layers = nn.ModuleList(_make_layer(cfg, i) for i in range(len(cfg.layer_shapes)))
+        self.layers = nn.ModuleList(_make_layer(cfg, i, base_state) for i in range(len(cfg.layer_shapes)))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         for layer in self.layers[:-1]:
@@ -102,9 +141,14 @@ class MLP(nn.Module):
         return sum(p.numel() for p in self.parameters())
 
 
-def build_model(cfg: ModelConfig, seed: int) -> MLP:
+def build_model(cfg: ModelConfig, seed: int, base_state: dict[str, torch.Tensor] | None = None) -> MLP:
     torch.manual_seed(seed)  # same seed => same init for every regime
-    return MLP(cfg)
+    return MLP(cfg, base_state)
+
+
+def trainable_params(model: MLP) -> list[torch.nn.Parameter]:
+    """Parameters that actually receive gradients (LoRA freezes the base and bias)."""
+    return [p for p in model.parameters() if p.requires_grad]
 
 
 def state_from_model(model: MLP) -> dict[str, torch.Tensor]:
@@ -112,7 +156,10 @@ def state_from_model(model: MLP) -> dict[str, torch.Tensor]:
 
 
 def numpy_state(state: dict[str, torch.Tensor]) -> dict[str, np.ndarray]:
-    return {k: v.detach().cpu().numpy() for k, v in state.items()}
+    """Detach to numpy. The `.copy()` is load-bearing: `tensor.numpy()` shares
+    storage, so without it a captured 'initial' state silently becomes the *final*
+    state as soon as training writes to those parameters."""
+    return {k: np.ascontiguousarray(v.detach().cpu().numpy()).copy() for k, v in state.items()}
 
 
 def spectra(state: dict[str, torch.Tensor]) -> dict[str, dict]:

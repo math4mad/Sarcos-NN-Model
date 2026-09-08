@@ -11,11 +11,12 @@ from __future__ import annotations
 import unittest
 
 import numpy as np
+import torch
 
 from sarcos_svd import lowrank
 from sarcos_svd.data import SplitConfig, block_split
-from sarcos_svd.lowrank import band_indices, truncate_matrix, truncate_state
-from sarcos_svd.model import ModelConfig
+from sarcos_svd.lowrank import band_indices, truncate_delta, truncate_matrix, truncate_state
+from sarcos_svd.model import ModelConfig, build_model, numpy_state
 
 
 class TestBands(unittest.TestCase):
@@ -110,6 +111,64 @@ class TestSplit(unittest.TestCase):
     def test_fractions_must_sum_to_one(self):
         with self.assertRaises(ValueError):
             SplitConfig(seed=1, block_size=10, train_frac=0.8, val_frac=0.1, test_frac=0.3)
+
+
+class TestStateCapture(unittest.TestCase):
+    """The dW studies compare a trained state against a stored init, so two things
+    must hold: the init is reproducible from the seed, and capturing it does not
+    alias the live parameters (`tensor.numpy()` shares storage — it silently turns
+    the captured 'init' into the final weights)."""
+
+    def test_numpy_state_does_not_alias_parameters(self):
+        cfg = ModelConfig(in_dim=4, out_dim=2, hidden=(6,))
+        model = build_model(cfg, 0)
+        captured = numpy_state(model.state_dict())
+        with torch.no_grad():
+            for p in model.parameters():
+                p.add_(1.0)
+        moved = numpy_state(model.state_dict())
+        self.assertTrue(any(not np.array_equal(captured[k], v) for k, v in moved.items()))
+
+    def test_init_is_reproducible_from_the_seed_and_seed_dependent(self):
+        cfg = ModelConfig(in_dim=21, out_dim=7, hidden=(64, 64))
+        a = numpy_state(build_model(cfg, 5).state_dict())
+        b = numpy_state(build_model(cfg, 5).state_dict())
+        c = numpy_state(build_model(cfg, 6).state_dict())
+        self.assertTrue(all(np.array_equal(a[k], b[k]) for k in a))
+        self.assertFalse(all(np.array_equal(a[k], c[k]) for k in a))
+
+
+class TestDeltaBands(unittest.TestCase):
+    """LoRA's object is the increment, not the matrix: truncating dW must leave the
+    frozen base intact and must be measured against ||dW||, never ||W||."""
+
+    def setUp(self):
+        rng = np.random.default_rng(2)
+        self.w0 = rng.normal(size=(12, 30))
+        # a deliberately low-rank increment, so band truncation has something to find
+        self.w1 = self.w0 + rng.normal(size=(12, 4)) @ rng.normal(size=(4, 30))
+
+    def test_full_rank_delta_truncation_reproduces_the_trained_matrix(self):
+        w_new, rep = truncate_delta(self.w1, self.w0, min(self.w1.shape), "leading")
+        self.assertLess(float(np.linalg.norm(w_new - self.w1)), 1e-9)
+        self.assertAlmostEqual(rep["delta_retained_energy"], 1.0, places=9)
+
+    def test_rank_one_delta_keeps_the_base_and_one_direction_of_movement(self):
+        w_new, rep = truncate_delta(self.w1, self.w0, 1, "leading")
+        s = np.linalg.svd(w_new - self.w0, compute_uv=False)
+        self.assertLess(s[1] / s[0], 1e-10)
+        self.assertEqual(rep["rank_effective"], 1)
+        self.assertGreater(rep["delta_over_base_fro"], 0.0)
+
+    def test_delta_bands_separate_the_four_directions_the_increment_actually_has(self):
+        # dW has rank 4 inside a 12x30 matrix: leading-4 keeps it all, leading-2 keeps
+        # most, and the trailing band falls into the null space of the movement.
+        _, lead4 = truncate_delta(self.w1, self.w0, 4, "leading")
+        _, lead2 = truncate_delta(self.w1, self.w0, 2, "leading")
+        _, tail2 = truncate_delta(self.w1, self.w0, 2, "trailing")
+        self.assertGreater(lead4["delta_retained_energy"], 0.999)
+        self.assertTrue(0.4 < lead2["delta_retained_energy"] < 1.0)
+        self.assertLess(tail2["delta_retained_energy"], 1e-6)
 
 
 class TestModelConfig(unittest.TestCase):

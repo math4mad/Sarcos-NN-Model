@@ -104,7 +104,10 @@ def aggregate(rows: list[dict]) -> list[dict]:
         "full-rank baseline (trained)": 0,
         "post-hoc-truncation": 1,
         "post-hoc-truncation-isoenergy": 2,
-        "trained-under-rank-constraint": 3,
+        "post-hoc-delta-truncation": 3,
+        "trained-under-rank-constraint": 4,
+        "trained-lora-increment": 5,
+        "trained-full-finetune": 6,
     }
     band_order = {"leading": 0, "middle": 1, "trailing": 2, "-": 3}
 
@@ -174,6 +177,30 @@ def add_baseline_rows(records: list[dict], swept_run_ids: set[str]) -> list[dict
                     "mse_raw_mean_test": r["metrics"]["test"]["mse_raw_mean"],
                     "delta_vs_fullrank_test": None,
                     "n_params": r["n_params"],
+                }
+            )
+        elif r["regime"] in ("trained-lora-increment", "trained-full-finetune"):
+            # LoRA's regime (base frozen, rank-r increment trained) and the standard
+            # full fine-tuning reference (warm start, everything trainable).
+            ranks = r["config"]["model"]["ranks"]
+            rows.append(
+                {
+                    "regime": r["regime"],
+                    "arch": arch_label(r),
+                    "energy_target": "-",
+                    "layer": "all",
+                    "band": "n/a (increment only, base frozen)" if r["regime"] == "trained-lora-increment"
+                          else "n/a (all weights trainable)",
+                    "rank_rung": "/".join(str(x) for x in ranks) if ranks else "full",
+                    "seed": r["seed"],
+                    "mse_test": r["metrics"]["test"]["mse_normalized"],
+                    "mse_val": r["metrics"]["val"]["mse_normalized"],
+                    "retained_energy_global": None,
+                    "mse_raw_mean_test": r["metrics"]["test"]["mse_raw_mean"],
+                    "delta_vs_fullrank_test": None,
+                    "n_params": r["n_params"],
+                    "n_trainable": r.get("n_trainable_params"),
+                    "fit_split": r.get("fit_split"),
                 }
             )
     return rows

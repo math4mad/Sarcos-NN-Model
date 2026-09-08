@@ -365,6 +365,100 @@ everywhere else (`_Liso-0.png`, `_Liso-1.png`, `_Lall.png`).
   0.015]`; the raw mean is dominated by joints 1–2, which is exactly why the
   normalised metric is the headline.
 
+## The LoRA connection
+
+LoRA's mathematical object is the same as ours — a rank-`r` factorisation of a
+weight matrix — but it is applied to the **increment**: `W_final = W_frozen + BA`
+(`src/sarcos_svd/model.py:LoRAIncrementLinear`, `A` random / `B` zero, so the update
+starts at exactly zero). That makes three regimes, and they are reported as three
+regimes:
+
+| rank (layer 2 capped at 7) | post-hoc deletion of `W` | trained as `W = UVᵀ` (replacement) | trained as `W_frozen + ΔW` (LoRA increment) |
+| --- | --- | --- | --- |
+| 1 | 1.0234 | 0.5280 | **0.0332** |
+| 4 | 0.9899 | 0.1137 | 0.0262 |
+| 16 | 0.4159 | 0.0207 | 0.0246 |
+| 21 | — | 0.0195 | 0.0240 |
+| 64 | 0.0332 | — | — |
+| full rank | 0.0161 (8 seeds) | — | 0.0178 (full fine-tuning, 3 seeds) |
+
+Selected model 21-256-256-7, test normalised MSE, mean of 3 seeds (13–15). The arms
+differ in what they fit, and that must be read into the table: deletion and
+replacement use the train blocks; the LoRA arm starts from the converged base and
+fits the **val** blocks (the adapter setting), so its comparison points are the
+frozen base (0.0161) and full fine-tuning (0.0178), not the from-scratch rows.
+
+**Two things fall out.** (1) Adding a rank-1 channel to a converged net costs 2×
+relative MSE; deleting everything *but* a rank-1 slice costs 60×. Low rank as an
+addition is far gentler than low rank as a constraint — which is the honest reason
+LoRA works, and it is not "the update is compressible". (2) Capacity is monotone in
+the adapter arms (rank 1 → 21: 0.0332 → 0.0240) and nothing reaches the frozen base,
+because this "downstream task" is 10% of the same distribution: with nothing new to
+learn, fine-tuning can only overwrite. A real LoRA-vs-full-FT comparison needs a
+shifted task, which this repo does not have — see the limitation below.
+
+### Is the learned increment low-rank? (LoRA's premise, measured)
+
+`ΔW = W_trained − W_init` per layer, 8 nets, `W_init` reproduced from the recorded
+seed and verified bit-identical to a stored init:
+
+| layer | shape | ‖ΔW‖_F / ‖W_init‖_F | energy in top-1 direction | rank for 99% of ‖ΔW‖² | full rank |
+| ----- | ----- | ------------------- | ------------------------- | ---------------------- | --------- |
+| 0 | 256×21 | 0.56 | 0.095 | 21.0 | 21 |
+| 1 | 256×256 | 1.69 | 0.057 | **144.1** | 256 |
+| 2 | 7×256 | 1.65 | 0.462 | 7.0 | 7 |
+
+**No.** The deviation from init is essentially full-rank, and the increment is
+*larger* than the initial weights (‖ΔW‖/‖W₀‖ ≈ 1.7). That is what training from
+scratch looks like; LoRA's intrinsic-rank evidence comes from *fine-tuning*, where
+‖ΔW ≪ ‖W. So this is not a refutation of LoRA — it is a statement about which
+setting this repository can actually test, and it says: do not import "the update is
+low-rank" from this experiment.
+
+### Do the bands of ΔW behave like the bands of W?
+
+Same band machinery, applied to the increment and added back to `W_init`
+(8 seeds; energy is now relative to **‖ΔW‖²**, not ‖W‖²):
+
+| truncated part | band | rank 1 | rank 4 | rank 16 | rank 32 | rank 64 |
+| -------------- | ---- | ------ | ------ | ------- | ------- | ------- |
+| whole net, ΔW | leading | 0.924 | 0.401 | 0.165 | 0.067 | 0.025 |
+| ‑ | middle | 0.951 | 0.875 | 0.825 | 0.807 | 0.805 |
+| ‑ | trailing | 0.979 | 0.927 | 0.821 | 0.807 | 0.807 |
+| layer 1 only, ΔW | leading | 0.736 (E0.06) | 0.325 (E0.28→0.11 at r2) | 0.148 (E0.46) | 0.067 (E0.67) | — |
+| ‑ | middle / trailing | 0.806 / 0.979 (E≈0.00) | 0.807 / 0.807 | 0.807 / 0.807 | 0.807 / 0.807 | — |
+| read-out (layer 2) only, ΔW | leading | 0.237 (E0.46) | 0.040 (E0.90) | — | — | — |
+| ‑ | middle | 0.239 (E0.11) | 0.086 (E0.49) | — | — | — |
+| ‑ | trailing | 0.292 (E0.02) | 0.215 (E0.20) | — | — | — |
+
+The ordering `leading ≫ middle ≈ trailing` transfers to the increment. **The
+read-out inversion does not**: middle beats leading at rank 2 (0.159 vs 0.176) but
+only at a quarter of the ΔW-energy, and loses clearly at rank 4 (0.086 vs 0.040).
+
+### Predictions, stated before running
+
+From the previous round, written down first: (a) *"LoRA-increment at rank 1 ≫
+post-hoc rank-1, like constrained already is"* — **true, by ~30×** (0.0332 vs
+1.0234). (b) *"if the read-out inversion reappears in ΔW, that is a real, checkable
+statement about where adapters should be initialised"* — **it does not reappear**, so
+the inversion stays a property of *which slice of the trained matrix you keep*, not
+of the update. Recording the miss matters: (b) was the interesting one.
+
+### Reproduce this
+
+```bash
+B=results/runs/full-256h256-seed13-blk256-f80-10-10-ep60-lr0.001-ranksnone/run.json
+python -m sarcos_svd.evaluate --run $B --delta-spectra                       # is dW low-rank?
+python -m sarcos_svd.evaluate --run $B --delta-sweep 1,2,4,8,16,32,64        # bands of dW
+python -m sarcos_svd.evaluate --run $B --delta-sweep 1,2,4,8,16,32 --layers 1,2
+python -m sarcos_svd.train --seed 13 --block-size 256 --fractions .8 .1 .1 --hidden 256 256 \
+    --mode lora --base-run $B --ranks 1 1 1 --train-on val --epochs 60       # frozen base + ΔW=AB
+python -m sarcos_svd.train --seed 13 --block-size 256 --fractions .8 .1 .1 --hidden 256 256 \
+    --mode full --warm-start $B --train-on val --epochs 60                    # full fine-tuning arm
+python -m sarcos_svd.train --seed 13 --block-size 256 --fractions .8 .1 .1 --hidden 256 256 \
+    --mode constrained --ranks 1 1 1 --epochs 60                             # replacement arm
+```
+
 ## Status
 
 Phase 5 done. The study has a **model selected on validation** (8 shapes compared;

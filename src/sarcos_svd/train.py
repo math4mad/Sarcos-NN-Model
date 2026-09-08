@@ -28,7 +28,14 @@ import torch
 
 from .data import SplitConfig, check_split_hygiene, fetch, load_split
 from .evaluate import PRIMARY_METRIC, inverse_standardise, prediction_metrics
-from .model import ModelConfig, build_model, numpy_state, spectra, state_from_model
+from .model import (
+    ModelConfig,
+    build_model,
+    numpy_state,
+    spectra,
+    state_from_model,
+    trainable_params,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULTS_ROOT = REPO_ROOT / "results"
@@ -57,10 +64,13 @@ def make_run_id(args: argparse.Namespace) -> str:
     arch = "h".join(str(h) for h in args.hidden)
     ranks = "none" if args.ranks is None else "-".join(str(r) for r in args.ranks)
     tag = f"_{args.tag}" if args.tag else ""
+    scale = "" if args.mode != "lora" else f"-s{str(args.lora_scale).rstrip('0').rstrip('.')}"
+    fit = "" if args.train_on == "train" else f"-fit{args.train_on}"
+    warm = "" if args.warm_start is None else "-warm"
     frac = "-".join(str(int(round(f * 100))) for f in args.fractions)
     return (
         f"{args.mode}-{arch}-seed{args.seed}-blk{args.block_size}-f{frac}"
-        f"-ep{args.epochs}-lr{str(args.lr).rstrip('0').rstrip('.')}{tag}-ranks{ranks}"
+        f"-ep{args.epochs}-lr{str(args.lr).rstrip('0').rstrip('.')}{tag}-ranks{ranks}{scale}{fit}{warm}"
     )
 
 
@@ -86,17 +96,24 @@ def train(args: argparse.Namespace) -> dict:
         test_frac=args.fractions[2],
     )
     data = load_split(split_cfg, args.data_dir)
+    base_record, base_state = load_base(args)
     model_cfg = ModelConfig(
         in_dim=data.x.shape[1],
         out_dim=data.y.shape[1],
         hidden=tuple(args.hidden),
         mode=args.mode,
         ranks=None if args.ranks is None else tuple(args.ranks),
+        lora_scale=args.lora_scale,
     )
-    model = build_model(model_cfg, args.seed)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr)
-    y = torch.as_tensor(data.y[data.idx["train"]], dtype=torch.float32)
-    x = torch.as_tensor(data.x[data.idx["train"]], dtype=torch.float32)
+    model = build_model(model_cfg, args.seed, base_state)
+    if args.mode == "full" and base_state is not None:  # warm start: same shapes, trainable
+        model.load_state_dict({k: v.clone() for k, v in base_state.items()})
+    init_state = numpy_state(model.state_dict())
+    opt = torch.optim.Adam(trainable_params(model), lr=args.lr)
+    fit_split = args.train_on
+    select_split = "val" if fit_split == "train" else "train"
+    y = torch.as_tensor(data.y[data.idx[fit_split]], dtype=torch.float32)
+    x = torch.as_tensor(data.x[data.idx[fit_split]], dtype=torch.float32)
     n = x.shape[0]
     step_rng = np.random.default_rng(args.seed + 1)  # shuffling stream, separate from init
 
@@ -114,7 +131,7 @@ def train(args: argparse.Namespace) -> dict:
             opt.step()
             totals += loss.detach().item() * len(b)
             seen += len(b)
-        val = evaluate_split(model, data, "val")
+        val = evaluate_split(model, data, select_split)
         history.append({"epoch": epoch, "train_loss_std_mse": totals / seen, "mse_val": val["mse_normalized"]})
         if val["mse_normalized"] < best["mse_val"]:
             best = {"mse_val": val["mse_normalized"], "epoch": epoch, "state": state_from_model(model)}
@@ -129,10 +146,21 @@ def train(args: argparse.Namespace) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     weights_path = out_dir / "weights.npz"
     np.savez(weights_path, **state)
+    # the increment studies need W_init; store it once, next to the trained weights
+    np.savez(out_dir / "weights_init.npz", **init_state)
 
     record = {
         "run_id": run_id,
-        "regime": ("trained-under-rank-constraint" if args.mode == "constrained" else "trained-unconstrained"),
+        "regime": {
+            ("full", False): "trained-unconstrained",
+            ("full", True): "trained-full-finetune",
+            ("constrained", False): "trained-under-rank-constraint",
+            ("lora", False): "trained-lora-increment",
+        }[(args.mode, args.warm_start is not None)],
+        "frozen_base_run": None if base_record is None else base_record["run_id"],
+        "warm_start_run": None if args.warm_start is None else base_record["run_id"],
+        "fit_split": fit_split,
+        "selection_split": select_split,
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "wall_seconds": round(time.time() - t0, 2),
         "seed": args.seed,
@@ -144,16 +172,23 @@ def train(args: argparse.Namespace) -> dict:
                 "batch_size": args.batch_size,
                 "optimizer": "Adam",
                 "loss": "mse on standardised targets",
-                "selection": "best validation normalised MSE (checkpoint, not final epoch)",
+                "selection": f"best normalised MSE on the {select_split} blocks (checkpoint, not final epoch)",
                 "hidden_dropout": 0.0,
             },
             "data_dir": str(args.data_dir or "data/"),
             "primary_metric": PRIMARY_METRIC,
+            "lora": None if args.mode != "lora" else {
+                "scale": args.lora_scale,
+                "init": "A kaiming, B zero => dW = 0 at step 0",
+                "frozen": "base weights and biases (buffers, no gradient)",
+                "trainable": "layers.N.a / layers.N.b only",
+            },
         },
         "split": data.split_manifest,
         "split_hygiene": check_split_hygiene(data),
-        "artifacts": {"weights": weights_path.name, "record": "run.json"},
+        "artifacts": {"weights": weights_path.name, "weights_init": "weights_init.npz", "record": "run.json"},
         "n_params": model.n_params(),
+        "n_trainable_params": sum(p.numel() for p in trainable_params(model)),
         "layer_shapes": [list(s) for s in model_cfg.layer_shapes],
         "metrics": metrics,
         "baseline_constant_predictor": {
@@ -171,6 +206,30 @@ def train(args: argparse.Namespace) -> dict:
     return record
 
 
+def load_base(args: argparse.Namespace) -> tuple[dict | None, dict | None]:
+    """Frozen base weights for --mode lora, or warm-start weights for --mode full.
+
+    Reads the base run's record and its trained weight matrices. For `lora` the base
+    is *frozen* (buffers); for `full` it is merely the starting point, so all of it
+    keeps training — that arm is the standard "full fine-tuning" reference LoRA is
+    usually compared against.
+    """
+    path = getattr(args, "base_run", None) or getattr(args, "warm_start", None)
+    if path is None:
+        return None, None
+    path = Path(path)
+    if not path.is_absolute():
+        path = REPO_ROOT / path
+    record = json.loads(path.read_text())
+    weights = np.load(path.parent / record["artifacts"]["weights"])
+    state = {k: torch.as_tensor(weights[k], dtype=torch.float32) for k in weights.files}
+    if tuple(record["config"]["model"]["hidden"]) != tuple(args.hidden):
+        raise SystemExit(f"--hidden must match the base run {tuple(record['config']['model']['hidden'])}")
+    if record["seed"] != args.seed:
+        print(f"note: base run seed {record['seed']} != this seed {args.seed}")
+    return record, state
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     # anything that moves a result is required, never defaulted silently
@@ -178,8 +237,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--block-size", type=int, required=True, help="contiguous rows per split block")
     p.add_argument("--fractions", type=float, nargs=3, required=True, metavar=("TRAIN", "VAL", "TEST"))
     p.add_argument("--hidden", type=int, nargs="+", default=[64, 64], help="hidden layer widths")
-    p.add_argument("--mode", choices=("full", "constrained"), required=True)
-    p.add_argument("--ranks", type=int, nargs="+", default=None, help="per-layer rank caps, --mode constrained only")
+    p.add_argument("--mode", choices=("full", "constrained", "lora"), required=True)
+    p.add_argument("--ranks", type=int, nargs="+", default=None, help="per-layer rank caps, constrained/lora")
+    p.add_argument("--base-run", default=None, help="run.json whose weights are FROZEN, --mode lora")
+    p.add_argument("--warm-start", default=None, help="run.json to initialise from, all weights trainable")
+    p.add_argument("--train-on", choices=("train", "val"), default="train",
+                   help="fit on the val blocks instead: a shifted downstream task for "
+                        "adapter experiments (selection then falls back to the train blocks)")
+    p.add_argument("--lora-scale", type=float, default=1.0, help="scale of the LoRA increment (alpha/r style)")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--batch-size", type=int, default=256)
@@ -192,15 +257,22 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.mode == "constrained" and args.ranks is None:
-        raise SystemExit("--mode constrained requires explicit --ranks (one per layer)")
+    if args.mode in ("constrained", "lora") and args.ranks is None:
+        raise SystemExit(f"--mode {args.mode} requires explicit --ranks (one per layer)")
     if args.mode == "full" and args.ranks is not None:
-        raise SystemExit("--ranks belongs to --mode constrained; post-hoc truncation is evaluate.py")
+        raise SystemExit("--ranks belongs to --mode constrained/lora; post-hoc truncation is evaluate.py")
+    if args.mode == "lora" and not args.base_run:
+        raise SystemExit("--mode lora requires --base-run <path/to/run.json> to freeze")
+    if args.mode != "lora" and args.base_run:
+        raise SystemExit("--base-run is only meaningful with --mode lora (use --warm-start)")
+    if args.base_run and args.warm_start:
+        raise SystemExit("give at most one of --base-run (frozen) / --warm-start (trainable)")
     if args.fetch:
         fetch(args.data_dir)
     record = train(args)
     print(json.dumps({k: record[k] for k in (
-        "run_id", "regime", "seed", "split", "split_hygiene", "n_params", "best_epoch", "metrics"
+        "run_id", "regime", "frozen_base_run", "warm_start_run", "fit_split", "selection_split",
+        "seed", "split", "n_params", "n_trainable_params", "best_epoch", "metrics"
     )}, indent=2))
     print(f"\nrun record: {RESULTS_ROOT / 'runs' / record['run_id'] / 'run.json'}")
 
