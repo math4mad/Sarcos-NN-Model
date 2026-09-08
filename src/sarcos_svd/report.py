@@ -19,7 +19,7 @@ from collections import defaultdict
 from pathlib import Path
 
 METRICS = ("mse_test", "mse_val", "retained_energy_global", "mse_raw_mean_test", "delta_vs_fullrank_test")
-KEY = ("regime", "layer", "band", "rank_rung")
+KEY = ("arch", "regime", "layer", "band", "rank_rung", "energy_target")
 
 
 
@@ -29,6 +29,13 @@ def _load_patterns(patterns: list[str]) -> list[Path]:
         for match in sorted(glob.glob(pat)):
             found.setdefault(match, None)
     return [Path(p) for p in found]
+
+
+def arch_label(record: dict) -> str:
+    """'21-64-64-7' — the architecture a row belongs to, so a wider/deeper net is
+    never silently averaged together with the canonical one."""
+    m = record["config"]["model"]
+    return "-".join(str(x) for x in [m["in_dim"], *m["hidden"], m["out_dim"]])
 
 
 def collect(runs: list[Path], sweeps: list[Path]) -> tuple[list[dict], list[dict], set[str]]:
@@ -41,9 +48,13 @@ def collect(runs: list[Path], sweeps: list[Path]) -> tuple[list[dict], list[dict
         swept_run_ids.add(blob.get("run_id"))
         run = baselines.get(blob.get("run_id"))
         seed = run["seed"] if run else blob.get("seed", "?")
+        arch = arch_label(run) if run else "?"
         for row in blob["rows"]:
             row.setdefault("layer", "all")
-            rows.append({**row, "seed": seed, "run_id": blob.get("run_id")})
+            # iso-energy rows can land on the same rung for different energy targets;
+            # keeping the target in the grouping key stops those rows merging.
+            row.setdefault("energy_target", "-")
+            rows.append({**row, "seed": seed, "arch": arch, "run_id": blob.get("run_id")})
     return records, [r for r in rows if r["run_id"] in swept_run_ids], swept_run_ids
 
 
@@ -57,13 +68,24 @@ def selected_energy(row: dict) -> float | None:
     return row.get("retained_energy_global")
 
 
+def group_key(row: dict) -> tuple:
+    """Iso-energy rows are grouped by the energy *target*, not by the rank found: the
+    ladder search lands on different integer ranks per seed, and splitting on that
+    would bury the 3-seed mean under several half-populated rows."""
+    rung = row["rank_rung"] if not str(row["regime"]).startswith("post-hoc-truncation-iso") else "-"
+    return (row["arch"], row["regime"], row["layer"], row["band"], rung, row["energy_target"])
+
+
 def aggregate(rows: list[dict]) -> list[dict]:
     groups: dict[tuple, list[dict]] = defaultdict(list)
     for r in rows:
-        groups[tuple(r[k] for k in KEY)].append(r)
+        groups[group_key(r)].append(r)
     out = []
     for key, part in groups.items():
         entry = dict(zip(KEY, key))
+        if str(entry.get("rank_rung")) == "-":  # iso-energy: show the rank range found
+            found = sorted({int(p["rank_rung"]) for p in part})
+            entry["rank_rung"] = str(found[0]) if len(found) == 1 else f"{found[0]}-{found[-1]}"
         entry["seeds"] = sorted(p["seed"] for p in part)
         for metric in METRICS:
             vals = [p[metric] for p in part if metric in p and p[metric] is not None]
@@ -95,10 +117,12 @@ def aggregate(rows: list[dict]) -> list[dict]:
 
     out.sort(
         key=lambda e: (
+            str(e["arch"]),
             order.get(e["regime"], 9),
             str(e["layer"]),
             band_order.get(e["band"], 9),
             rung_key(e["rank_rung"]),
+            str(e["energy_target"]),
         )
     )
     return out
@@ -120,6 +144,8 @@ def add_baseline_rows(records: list[dict], swept_run_ids: set[str]) -> list[dict
             rows.append(
                 {
                     "regime": "full-rank baseline (trained)",
+                    "arch": arch_label(r),
+                    "energy_target": "-",
                     "layer": "all",
                     "band": "-",
                     "rank_rung": "full",
@@ -136,6 +162,8 @@ def add_baseline_rows(records: list[dict], swept_run_ids: set[str]) -> list[dict
             rows.append(
                 {
                     "regime": "trained-under-rank-constraint",
+                    "arch": arch_label(r),
+                    "energy_target": "-",
                     "layer": "all",
                     "band": "n/a (capacity was never there)",
                     "rank_rung": "/".join(str(x) for x in ranks),
@@ -187,10 +215,12 @@ def main() -> None:
     print(f"{len(rows)} sweep rows from {len(records)} run records -> {out}")
 
     cols = [
+        "arch",
         "regime",
         "layer",
         "band",
         "rank_rung",
+        "energy_target",
         "n_runs",
         "energy_mean",
         "mse_test_mean",

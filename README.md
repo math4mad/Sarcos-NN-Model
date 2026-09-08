@@ -69,15 +69,29 @@ python -m sarcos_svd.evaluate --run results/runs/<run_id>/run.json \
     --layers all --sweep 1,2,4,8,16,32,64 --plot
 python -m sarcos_svd.evaluate --run results/runs/<run_id>/run.json \
     --layers 0,1,2 --sweep 1,2,4,8,16,32,64          # single-variable ablations
+# bands at matched energy; give hit_energy every rank as the ladder, or a coarse
+# ladder silently turns "could not reach the target" into a full-rank row
 python -m sarcos_svd.evaluate --run results/runs/<run_id>/run.json \
-    --layers 0,1,2 --iso-energy 0.9,0.7,0.5,0.3,0.1  # bands at matched energy
+    --layers 0,1,2 --iso-energy 0.9,0.7,0.5,0.3,0.1 \
+    --rungs $(python -c "print(','.join(str(i) for i in range(1,65)))")
+python -m sarcos_svd.evaluate --run results/runs/<run_id>/run.json \
+    --layers all --iso-energy 0.9,0.7,0.5 --rungs $(python -c "print(','.join(str(i) for i in range(1,65)))")
 
 # 5. the other regime: trained *under* a rank constraint (never merged with 2-4)
 python -m sarcos_svd.train --seed 13 --block-size 256 --fractions .8 .1 .1 \
     --hidden 64 64 --mode constrained --ranks 1 1 1 --epochs 60
 
+# robustness: the same sweep on other shapes
+for H in "32" "64" "64 64 64" "128 128"; do
+  for S in 13 14 15; do
+    python -m sarcos_svd.train --seed $S --block-size 256 --fractions .8 .1 .1 \
+        --hidden $H --mode full --epochs 60
+  done
+done
+
 # aggregate every sweep into one table, with the spread across seeds
 python -m sarcos_svd.report --layer all --markdown
+python -m sarcos_svd.report --layer 2 --markdown
 python -m unittest discover -s tests        # band/truncation/split invariants
 ```
 
@@ -113,25 +127,26 @@ Baseline raw MSE of the constant predictor: **135.5 N·m²**.
 | ‑ ‑ | 16 | trailing | 1.0779 | 0.281 |
 | ‑ ‑ | 8 | trailing | 1.0754 | 0.148 |
 | ‑ ‑ | 1 | trailing | 1.0570 | 0.006 |
-| *same, but bands compared at matched energy (whole net)* | | | | |
-| ‑ ‑, iso-energy 0.5 | 6 | leading | 0.8907 | 0.501 |
-| ‑ ‑, iso-energy 0.5 | 24 | middle | 1.0701 | 0.548 |
-| ‑ ‑, iso-energy 0.5 | 24 | trailing | 1.0711 | 0.450 |
+| *same, but bands compared at matched energy (whole net, rank ladder = every rank 1…64)* | | | | |
+| ‑ ‑, iso-energy 0.9 | 23–24 | leading | 0.0884 | 0.904 |
+| ‑ ‑, iso-energy 0.9 | 59 | middle | 0.5840 | 0.909 |
+| ‑ ‑, iso-energy 0.9 | 62 | trailing | 0.5842 | 0.909 |
+| ‑ ‑, iso-energy 0.7 | 12 | leading | 0.3693 | 0.715 |
+| ‑ ‑, iso-energy 0.7 | 45 | middle | 0.9464 | 0.711 |
+| ‑ ‑, iso-energy 0.7 | 55 | trailing | 0.9450 | 0.712 |
+| ‑ ‑, iso-energy 0.5 | 6–7 | leading | 0.7775 | 0.528 |
+| ‑ ‑, iso-energy 0.5 | 20 | middle | 1.0948 | 0.523 |
+| ‑ ‑, iso-energy 0.5 | 37–38 | trailing | 1.0530 | 0.504 |
 | *single-variable ablation: one layer truncated, the rest full rank* | | | | |
 | ‑ ‑, layer 1 only (64×64) | 16 | leading | 0.1477 | 0.703 |
 | ‑ ‑, layer 1 only | 16 | middle | 1.0861 | 0.128 |
 | ‑ ‑, layer 1 only | 16 | trailing | 1.0763 | 0.009 |
-| ‑ ‑, layer 1 only, iso-energy 0.33 | 6 | leading | 0.4729 | 0.389 |
-| ‑ ‑, layer 1 only, iso-energy 0.33 | 48 | middle | 0.8998 | 0.529 |
 | ‑ ‑, layer 0 only (64×21) | 16 | leading | 0.0690 | 0.929 |
 | ‑ ‑, layer 0 only | 16 | middle | 0.3797 | 0.734 |
 | ‑ ‑, layer 0 only | 16 | trailing | 0.7256 | 0.529 |
 | ‑ ‑, layer 2 only (7×64, max rank 7) | 4 | leading | 0.1126 | 0.831 |
 | ‑ ‑, layer 2 only | 4 | middle | 0.2421 | 0.565 |
 | ‑ ‑, layer 2 only | 4 | trailing | 0.8336 | 0.302 |
-| ‑ ‑, layer 2 only, iso-energy 0.35 | 1 | leading | 0.8787 | 0.350 |
-| ‑ ‑, layer 2 only, iso-energy 0.35 | 3 | middle | 0.5540 | 0.352 |
-| ‑ ‑, layer 2 only, iso-energy 0.35 | 4 | trailing | 0.7450 | 0.333 |
 | *trained **under** a rank constraint — different experiment, different row (rule 3)* | | | | |
 | MLP 21-64-64-7, layers trained as `U Vᵀ`, rank 1 | 1/1/1 | n/a | 0.5258 | n/a (never had it) |
 | ‑ ‑, rank 4 | 4/4/4 | n/a | 0.1170 | n/a |
@@ -140,6 +155,57 @@ Baseline raw MSE of the constant predictor: **135.5 N·m²**.
 Full per-joint numbers, per-layer energies and the JSON for every cell are in
 `results/summary.json` (regenerate with `python -m sarcos_svd.report`).
 
+### Architecture robustness
+
+Same canonical split, optimiser and 3 seeds; only the shape changes (columns
+identical to the table above, whole net truncated at one uniform rank rung).
+The narrow nets have full rank below rung 32, so their last rung is closer to
+untruncated by construction.
+
+| Model | Rank | Band | Test MSE | Retained energy |
+| ----- | ---- | ---- | -------- | --------------- |
+| MLP 21-32-7 (1 hidden, 935 params), baseline | full (21/7) | — | 0.0412 (0.0362–0.0461) | 1.000 |
+| ‑ ‑, truncated | 16 | leading | 0.0595 | 0.985 |
+| ‑ ‑ | 16 | middle | 0.4168 | 0.758 |
+| ‑ ‑ | 16 | trailing | 0.8901 | 0.569 |
+| MLP 21-64-7 (1 hidden, 1,863 params), baseline | full (21/7) | — | 0.0311 (0.0260–0.0352) | 1.000 |
+| ‑ ‑, truncated | 16 | leading | 0.0854 | 0.959 |
+| ‑ ‑ | 16 | middle | 0.4318 | 0.767 |
+| ‑ ‑ | 16 | trailing | 0.8247 | 0.610 |
+| MLP 21-64-64-7 (canonical, 6,023 params), baseline | full (64/64/7) | — | 0.0250 (0.0216–0.0285) | 1.000 |
+| ‑ ‑, truncated | 32 | leading | 0.0455 | 0.957 |
+| ‑ ‑ | 32 | middle | 1.0397 | 0.596 |
+| ‑ ‑ | 32 | trailing | 1.0596 | 0.475 |
+| MLP 21-64-64-64-7 (3 hidden, 10,183 params), baseline | full | — | 0.0242 (0.0207–0.0284) | 1.000 |
+| ‑ ‑, truncated | 32 | leading | 0.0537 | 0.950 |
+| ‑ ‑ | 32 | middle | 1.0639 | 0.472 |
+| ‑ ‑ | 32 | trailing | 1.0534 | 0.336 |
+| MLP 21-128-128-7 (2 hidden, wide, 20,231 params), baseline | full | — | 0.0193 (0.0165–0.0227) | 1.000 |
+| ‑ ‑, truncated | 64 | leading | 0.0258 | 0.960 |
+| ‑ ‑ | 64 | middle | 1.0645 | 0.522 |
+| ‑ ‑ | 64 | trailing | 1.0729 | 0.402 |
+
+### Bands at matched energy, one layer at a time (canonical net)
+
+Smallest rank reaching the target energy in *that* layer, searched over every rank
+1…64 (mean of 3 seeds, test normalised MSE; the rank the search landed on across
+seeds and the achieved energy are in brackets — every cell is one row of
+`results/summary.json`).
+
+| Layer (shape, σ_max/σ_min) | E target | leading | middle | trailing |
+| --- | --- | --- | --- | --- |
+| 0 (64×21, 3.5) | 0.7 | 0.322 (r9–10, E0.716) | 0.380 (r16, E0.734) | 0.382 (r18–19, E0.740) |
+| 0 | 0.5 | 0.570 (r6, E0.539) | 0.665 (r12, E0.532) | 0.726 (r16, E0.529) |
+| 0 | 0.3 | 0.887 (r3–4, E0.345) | 0.900 (r8, E0.343) | 0.962 (r12–13, E0.332) |
+| 1 (64×64, 239) | 0.9 | **0.052** (r29–30, E0.905) | 0.257 (r61, E0.913) | 0.257 (r63, E0.913) |
+| 1 | 0.7 | **0.145** (r16–17, E0.710) | 0.815 (r55, E0.712) | 0.816 (r60, E0.712) |
+| 1 | 0.5 | **0.329** (r9, E0.507) | 0.898 (r47, E0.528) | 0.897 (r56, E0.530) |
+| 1 | 0.3 | **0.524** (r5, E0.342) | 1.039 (r33, E0.310) | 1.047 (r48–49, E0.312) |
+| 2 (7×64, 3.7) | 0.5 | 0.605 (r2, E0.543) | **0.242** (r4, E0.565) | **0.204** (r6, E0.650) |
+| 2 | 0.3 | 0.879 (r1, E0.350) | **0.537** (r2–3, E0.339) | 0.590 (r4–5, E0.402) |
+
+Layer 2 has only 7 directions, so targets above 0.5 are reachable only at rank 6–7
+(i.e. essentially untruncated) and are omitted rather than reported as a result.
 ### Findings
 
 1. **The leading band carries the learning effect.** Post-hoc truncation of the
@@ -151,24 +217,42 @@ Full per-joint numbers, per-layer energies and the JSON for every cell are in
    matter which band you keep instead.
 2. **Retained energy does not track function** (rule 4 is what exposes this).
    Middle-32 keeps 60% of the energy and 0% of the performance. Conversely, at
-   *matched* energy the bands still separate (E≈0.5: leading 0.891 vs middle
-   1.070 vs trailing 1.071). Energy is necessary context, not an explanation.
-3. **Band sensitivity follows each layer's spectral concentration.** Layer 1
-   (64×64) has σ_max/σ_min ≈ 239 and is where truncation hurts most; layer 0
-   (64×21, ratio 3.5) and layer 2 (7×64, ratio 3.7) have flat-ish spectra, so
-   their bands differ far less, and layer 2 saturates by rank 7 because that is
-   its full rank.
-4. **The one place the middle band wins is the output layer.** At matched energy
-   ≈0.35 on layer 2, middle (0.554) beats both leading (0.879) and trailing
-   (0.745) — i.e. for the 7×64 read-out map, the *bulk* directions generalise
-   better than the dominant ones. This is a single layer at coarse rank
-   granularity (rank ≤ 7), so treat it as the lead for a follow-up, not a
-   conclusion.
+   *matched* energy the bands still separate badly (whole net, E≈0.9: leading
+   0.088 vs middle 0.584 vs trailing 0.584 — a 6.6× gap at 5% energy tolerance),
+   and the gap closes only below E≈0.3, where every band is equally dead. Energy
+   is necessary context, not an explanation.
+3. **Band sensitivity follows each layer's spectral concentration, and it is the
+   bottleneck that bites.** Layer 1 (64×64) has σ_max/σ_min ≈ 239 and dominates
+   the whole-net result: at matched energy it is 2–8× better than the other bands
+   (E0.5: leading 0.329 vs middle 0.898 vs trailing 0.897, in ranks 9 vs 47 vs 56
+   — i.e. leading needs 5× fewer directions for the same energy *and* loses far
+   less accuracy). Layer 0 (ratio 3.5) is nearly band-agnostic (E0.7: 0.322 /
+   0.380 / 0.382), and at matched energy **middle and trailing are
+   indistinguishable everywhere** — they are simply "not the top directions".
+   The clean ordering leading < middle < trailing only appears in the flat input
+   layer at mid energies (E0.5: 0.570 / 0.665 / 0.726).
+4. **The band inversion lives in the read-out layer.** For layer 2 (7×64) at
+   matched energy 0.5, *middle* scores **0.242** and *trailing* **0.204** while
+   *leading* scores 0.605; at 0.3 it is 0.537 / 0.590 / 0.879. So for the 7-output
+   read-out map the dominant singular direction is the *worst* one to keep — the
+   only place the README's "middle matters most" survives, and the strongest
+   reason to run a dedicated follow-up. Caveat: 7 directions means coarse energy
+   matching, and the effect is seen at 2 energy targets on 3 seeds.
 5. **Step 5 sanity check: no — the ordering is the other way.** Training *under*
    a rank constraint beats truncating a trained net at the same rank by a wide
    margin: rank 1 → 0.526 vs 1.044; rank 4 → 0.117 vs 1.080; rank 16 → 0.030 vs
    0.175. A net that never had the capacity finds a usable low-rank solution; a
    net that had it and lost it does not.
+6. **"Leading wins, middle/trailing die" holds across shapes, and gets worse with
+   depth.** Across 1-, 2- and 3-hidden-layer nets (table above), the leading band
+   always recovers towards baseline while middle/trailing sit at ≈1.05 once the
+   truncation is applied to more than one layer. The 1-hidden-layer nets are the
+   partial exception (middle 0.42, trailing 0.89 at rung 16), i.e. a single
+   band-truncated bottleneck is partly recoverable whereas stacked ones are not.
+7. **Required rank grows with width, not with damage.** 21-128-128-7 needs rung 64
+   to reach 0.96 energy and 0.0258 (vs its 0.0193 baseline), where the canonical
+   64-wide net needs 32 — so rank must be reported *relative to layer width*, and
+   absolute-rank comparisons across architectures are meaningless.
 
 ### Validity checks (reported so the split choice is not load-bearing in secret)
 
@@ -181,21 +265,31 @@ Full per-joint numbers, per-layer energies and the JSON for every cell are in
   number is the pessimistic-but-honest one.
 * **Seed spread** at the canonical config: 0.0216 / 0.0248 / 0.0285 (±14% of the
   mean) — the same order as the rank-32 leading effect, hence every row is a
-  3-seed mean with min/max.
+  3-seed mean with min/max. Note the coupling: one `--seed` drives *both* the
+  block-split permutation and the initialisation, so this spread is split
+  variation + init variation together, not init noise alone.
+* **Scope of the per-layer ablations**: layers are indexed in forward order
+  (`0` = 64×21 input map, `1` = 64×64, `2` = 7×64 read-out), and per-layer
+  iso-energy / single-variable rows exist only for the canonical 21-64-64-7 net;
+  the architecture table truncates the whole net at one uniform rank.
 * Baseline per-joint normalised MSE: `[0.024, 0.029, 0.019, 0.008, 0.041, 0.038,
   0.015]`; the raw mean is dominated by joints 1–2, which is exactly why the
   normalised metric is the headline.
 
 ## Status
 
-Phase 2 done: scaffold built (`src/sarcos_svd/{data,model,train,lowrank,evaluate,report}.py`,
-`tests/`), environment pinned (`requirements.txt`, `.venv`), `.gitignore` added so
-`data/` and `results/` stay untracked. Baseline + post-hoc truncation sweeps
-(3 seeds, 3 bands × 7 ranks, whole-net and per-layer, plus iso-energy) and the
-trained-under-constraint regime are all run; numbers are in the table above.
-Still open: MLP depth/width was fixed at one architecture without comparison to
-others, layer 2's middle-band lead needs a dedicated follow-up, and no licence
-has been chosen.
+Phase 3 done: the scaffold and the first study are committed (`cda705b`), and the
+headline result — **the leading singular band carries the learning effect; middle
+and trailing are indistinguishable and both fatal; retained energy does not
+predict function** — now rests on 5 architectures × 3 seeds rather than one net.
+`data/` and `results/` stay git-ignored, so a clean checkout needs
+`python -m sarcos_svd.data --fetch`.
+
+Still open: the layer-2 middle-band inversion (only 7 directions to work with, so
+energy matching is coarse — needs a dedicated run with more seeds and a wider
+read-out), the fact that no architecture was *chosen* on validation for the study
+(all 5 are reported, none is "the" model), dropout/regularisation untouched, and
+no licence has been chosen.
 
 ## License
 
