@@ -1,0 +1,35 @@
+project:
+  type: website
+  output-dir: docs          # git-ignored; published by the quarto-publish workflow
+  preview:
+    port: 4200
+  render:
+    - index.qmd
+    - notes/results.qmd
+
+website:
+  title: "SARCOS × SVD"
+  navbar:
+    left:
+      - href: index.qmd
+        text: Overview
+      - href: notes/results.qmd
+        text: Results note
+    right:
+      - icon: github
+        href: https://github.com/math4mad
+  page-footer:
+    left: "© 2026 math4mad — dual-licensed MIT OR Apache-2.0"
+    right: "SARCOS data © Rasmussen & Williams; not redistributed here."
+  repo-url: https://github.com/math4mad/Sarcos-NN-Model
+
+# Document-level licence metadata lives in pyproject.toml / LICENSE-* files;
+# quarto's `website:` key has no `license` field.
+
+format:
+  html:
+    theme: cosmo
+    number-sections: true
+    toc-title: Contents
+    fig-align: center
+    code-overflow: wrap

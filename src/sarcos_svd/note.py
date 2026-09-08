@@ -29,7 +29,6 @@ format:
     number-sections: true
     theme: cosmo
     fig-align: center
-    self-contained: true
 echo: false
 warning: false
 ---

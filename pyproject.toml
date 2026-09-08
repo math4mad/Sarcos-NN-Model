@@ -7,6 +7,10 @@ name = "sarcos-svd"
 version = "0.1.0"
 description = "SVD probe of what a small MLP learns on the SARCOS robot-arm inverse-dynamics task"
 requires-python = ">=3.10"
+# Dual-licensed: choose either. See LICENSE-MIT, LICENSE-APACHE and NOTICE - the
+# SARCOS data itself is third-party and is not covered by either licence.
+license = "MIT OR Apache-2.0"
+license-files = ["LICENSE-MIT", "LICENSE-APACHE", "NOTICE"]
 dependencies = ["numpy", "scipy", "torch", "matplotlib"]
 
 [project.optional-dependencies]

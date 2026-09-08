@@ -2,20 +2,22 @@
 data/
 results/
 
+# environment
 .venv/
 __pycache__/
 *.pyc
-.DS_Store
-
 *.egg-info/
 
-# rendered presentation note
-notes/_quarto/
+# macOS clutter
+.DS_Store
+
+# rendered output: the site lives on the gh-pages branch, not next to the code
+docs/
 .quarto/
+**/*.quarto_ipynb
+notes/results.html
+
+# scratch dir used by sarcos_svd.publish to stage the gh-pages branch
+.gh-pages-worktree/
 
 /.quarto/
-**/*.quarto_ipynb
-
-# rendered presentation note (regenerate: python -m sarcos_svd.note && quarto render notes/results.qmd)
-notes/results.html
-.quarto/

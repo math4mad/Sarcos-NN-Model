@@ -30,7 +30,7 @@ Do not silently pick one of these — surface the choice to the user.
 | Dataset source, file format, train/val/test split | **resolved & pinned in `data.py`**: GPML `sarcos_inv*.mat`, 21→7, contiguous-block split (block 256, .8/.1/.1, seeded). The published test file is 98.2% inside train and is *not* used. |
 | MLP depth/width (what counts as "each layer") | **one choice made, not compared**: 21-64-64-7, so 3 weight matrices. Still open whether the finding holds for other shapes. |
 | Which MSE (normalized? per-replicator? averaged?) | **resolved: primary = per-joint normalised MSE**, raw N·m² mean + all 7 joints per joint always reported alongside |
-| License | none chosen |
+| License | **resolved: MIT OR Apache-2.0** (dual). `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`; the SARCOS data is third-party and is not covered |
 
 ## Hard rules for experiments
 
@@ -55,6 +55,7 @@ look right and mean nothing.
 
 ```
 data/            # inputs, git-ignored
+index.qmd      # site landing page (renders headline numbers from results/)
 src/sarcos_svd/
   data.py        # canonical loader + split (the ONLY place splits are defined)
   model.py       # MLP definition
@@ -63,7 +64,9 @@ src/sarcos_svd/
   evaluate.py    # MSE + retained-energy reporting
   report.py      # aggregate sweeps over seeds into the README table
   note.py        # writes notes/results.qmd from the artifacts (Quarto presentation)
+  publish.py     # renders the site into docs/ and stages it on gh-pages
 notes/           # results.qmd (source, tracked) + results.html (rendered, ignored)
+docs/            # site build output, git-ignored; published via the gh-pages branch
 results/         # per-run JSON/CSV summaries, git-ignored
 tests/           # stdlib unittest invariants for bands, truncation, splitting
 README.md        # human-readable summary; results table lives here
@@ -93,6 +96,10 @@ Prefer adding files to this shape over inventing new top-level scripts.
 ## Non-goals
 
 - No web UI, API, server, Dockerfile, CI, or CLI framework unless requested.
+  **Requested and built since:** a Quarto note and a `gh-pages` site
+  (`index.qmd`, `_quarto.yml`, `src/sarcos_svd/publish.py`). Still absent by
+  choice: a CI workflow (the site is published from local artifacts, so a runner
+  could not reproduce the numbers without re-running the study), and any web app.
 - No dataset-wide preprocessing "improvements" (feature engineering, target
   scaling changes) mid-study — they invalidate cross-run comparison.
 - Do not commit the SARCOS data or license-restricted downloads without asking.

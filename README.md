@@ -367,9 +367,12 @@ everywhere else (`_Liso-0.png`, `_Liso-1.png`, `_Lall.png`).
 
 ## Status
 
-Phase 4 done: the study now has a **model selected on validation** (8 shapes
-compared; 21-256-256-7 wins, 73,223 params) and the read-out-layer inversion has
-been **replicated at 8 seeds** with non-overlapping per-seed ranges. Headline
+Phase 5 done. The study has a **model selected on validation** (8 shapes compared;
+21-256-256-7 wins, 73,223 params), the read-out-layer inversion has been
+**replicated at 8 seeds** with non-overlapping per-seed ranges, the results are
+presented as a **Quarto note**, the site config + `python -m sarcos_svd.publish`
+stage the whole thing onto a **`gh-pages`** branch, and a **licence was chosen**:
+MIT OR Apache-2.0 (data excluded — see `NOTICE`). Headline
 result unchanged: **the leading singular band carries the learning effect; middle
 and trailing are indistinguishable and both fatal; retained energy does not
 predict function** — with the read-out layer as the single, now better-supported
@@ -382,9 +385,37 @@ Still open: dropout/regularisation untouched; the read-out inversion is
 replicated but unexplained (nothing here says *why* the top direction of the
 7×256 map is the one you can afford to drop); and no licence has been chosen.
 
+## Publish the site
+
+The same note, published as a small Quarto website (`index.qmd` + the note) on the
+`gh-pages` branch:
+
+```bash
+python -m sarcos_svd.publish              # render -> docs/ -> commit onto gh-pages
+python -m sarcos_svd.publish --push       # ...and push, once an origin exists
+```
+
+`publish` renders **from the local artifacts** (`results/summary.json`, the run
+records, the plots) and never re-runs the study, so the published numbers are the
+seeded, CPU-deterministic ones rather than a fresh run on a different machine. It
+stages the site through a scratch `git worktree`, so your working branch is never
+switched and generated HTML/PNG never lands next to the code.
+
+Then: `git push -u origin <branch> gh-pages`, and in GitHub → Settings → Pages
+choose **Deploy from a branch → `gh-pages` / `/ (root)`**.
+
 ## License
 
-_Not yet chosen._
+Dual-licensed **MIT OR Apache-2.0** — pick either, as is common for
+interoperable code (SPDX: `MIT OR Apache-2.0`, recorded in `pyproject.toml`).
+
+- `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`
+- The **SARCOS data is not covered by either licence**: `sarcos_inv.mat` and
+  `sarcos_inv_test.mat` are published with Rasmussen & Williams' *GPML*, are
+  fetched at run time by `python -m sarcos_svd.data --fetch`, and stay
+  git-ignored. Nothing here grants rights to redistribute it.
+- The `.agents/*/SKILL*.md` files declare Apache-2.0 in their front matter, which
+  is compatible with the Apache half of this dual licence.
 
 
 ## Follow. .agents/. directives

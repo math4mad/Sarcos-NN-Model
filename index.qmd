@@ -1,0 +1,126 @@
+---
+title: "What does a small MLP actually learn from SARCOS?"
+subtitle: "An SVD study of layer weight matrices, with a warning about the published split"
+---
+
+```{python}
+#| echo: false
+import json
+from pathlib import Path
+
+import pandas as pd
+from great_tables import GT, md
+
+
+def _root() -> Path:
+    here = Path.cwd()
+    for cand in [here, *here.parents]:
+        if (cand / "results" / "summary.json").exists():
+            return cand
+    raise RuntimeError(
+        "results/summary.json not found: run `python -m sarcos_svd.report` first "
+        "(the site is rendered from local artifacts, it does not re-run the study)"
+    )
+
+
+RES = _root() / "results"
+summary = json.loads((RES / "summary.json").read_text())
+rows = summary["rows"]
+
+
+def one(regime, arch, layer="all", band="-", rung=None, target=None):
+    got = [r for r in rows if r["regime"] == regime and r["arch"] == arch
+           and str(r["layer"]) == str(layer) and r["band"] == band]
+    if rung is not None:
+        got = [r for r in got if str(r["rank_rung"]) == str(rung)]
+    if target is not None:
+        got = [r for r in got if r.get("energy_target") == target]
+    if not got:
+        raise LookupError(f"missing row: {regime} {arch} {layer} {band} {rung} {target}")
+    return got[0]
+
+
+SEL = "21-256-256-7"
+CANON = "21-64-64-7"
+base = one("full-rank baseline (trained)", SEL)
+lead128 = one("post-hoc-truncation", SEL, band="leading", rung=128)
+mid128 = one("post-hoc-truncation", SEL, band="middle", rung=128)
+l2_mid = one("post-hoc-truncation-isoenergy", SEL, layer=2, band="middle", target=0.5)
+l2_lead = one("post-hoc-truncation-isoenergy", SEL, layer=2, band="leading", target=0.5)
+
+GT(pd.DataFrame({
+    "measurement": [
+        "selected model, full rank (8 seeds)",
+        "same net, every layer truncated to rank 128 *leading*",
+        "same net, rank 128 *middle*",
+        "read-out layer alone, energy-matched at 0.5: *middle*",
+        "read-out layer alone, energy-matched at 0.5: *leading*",
+    ],
+    "test MSE (normalised per joint)": [
+        f"{base['mse_test_mean']:.4f}",
+        f"{lead128['mse_test_mean']:.4f}  (energy {lead128['energy_mean']:.3f})",
+        f"{mid128['mse_test_mean']:.4f}  (energy {mid128['energy_mean']:.3f})",
+        f"{l2_mid['mse_test_mean']:.4f}  (energy {l2_mid['energy_mean']:.3f})",
+        f"{l2_lead['mse_test_mean']:.4f}  (energy {l2_lead['energy_mean']:.3f})",
+    ],
+    "seeds": [base["n_seeds"], lead128["n_seeds"], mid128["n_seeds"], l2_mid["n_seeds"], l2_lead["n_seeds"]],
+})).tab_options(table_font_size="14px", column_labels_font_weight="normal") \
+   .cols_label(measurement=md("measurement")) \
+   .tab_source_note(md("1.0 = predicting the train mean. Full tables, per-joint numbers and "
+                       "the split forensics are in the results note."))
+```
+
+## The short version {#short}
+
+::: callout-warning
+The **leading** singular directions carry the learning effect. Keep the top 128
+directions of every layer and the net is barely damaged; keep an equal-rank slice
+of the bulk or the tail and it is no better than a constant predictor — even while
+holding a third of the Frobenius energy. **Retained energy does not predict
+function**, so any low-rank claim must report both.
+
+The one exception is the read-out layer (7 × width): there, at matched energy, the
+*middle* band beats the *leading* band. That was the README's original hypothesis,
+and it survives only in that one place — replicated across 8 seeds with
+non-overlapping per-seed ranges.
+:::
+
+## What is in here {#contents}
+
+1. **[Results note](notes/results.qmd)** — the whole study as an executable Quarto
+   note: hypothesis, split forensics, baseline, rank sweeps, iso-energy sweeps,
+   per-layer ablations, the trained-under-constraint regime, validity checks.
+   Every table is generated from `results/summary.json` and the run records at
+   render time, so the prose cannot drift from the runs.
+2. **The [`README`](https://github.com/math4mad/Sarcos-NN-Model)** in the repository
+   carries the same tables in compact form, plus the experiment plan and the
+   rules the study is run under.
+
+## The forensics nobody asked for {#split}
+
+The published GPML test file is **every 10th row of the published training file,
+and still inside it** — 98.2% of its rows occur verbatim in train. Rows are also in
+trajectory order, so a row-wise random split leaks too (0.0207 vs 0.0248 vs 0.0357
+test MSE for row-wise / 256-row / 4096-row block sizes on the same net). The split
+is therefore defined once, in `src/sarcos_svd/data.py`, as a seeded permutation of
+contiguous row blocks, and recorded in every run.
+
+## Reproduce {#reproduce}
+
+``` bash
+pip install -r requirements.txt && pip install -e .
+python -m sarcos_svd.data --fetch --report
+python -m sarcos_svd.train --seed 13 --block-size 256 --fractions .8 .1 .1 \
+    --hidden 256 256 --mode full --epochs 60
+python -m sarcos_svd.evaluate --run results/runs/<run_id>/run.json \
+    --layers all --sweep 1,2,4,8,16,32,64,128 --plot
+python -m sarcos_svd.report --out results/summary.json
+python -m sarcos_svd.publish            # builds this site onto the gh-pages branch
+```
+
+## Licence {#licence}
+
+Code, data-analysis scripts and this write-up are dual-licensed **MIT OR
+Apache-2.0** (see `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`). The SARCOS data is
+third-party (Rasmussen & Williams, *GPML*), downloaded at run time, and is **not**
+covered by either licence; it is git-ignored and never redistributed.

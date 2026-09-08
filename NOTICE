@@ -1,0 +1,16 @@
+SARCOS Neural Network x SVD Low-Rank Analysis
+Copyright (c) 2026 math4mad
+
+This repository is dual-licensed under the MIT License and the Apache License
+2.0 (the "Licences"); you may choose either one. See LICENSE-MIT and
+LICENSE-APACHE.
+
+Third-party material is NOT covered by these Licences:
+
+  * The SARCOS inverse-dynamics data (sarcos_inv.mat, sarcos_inv_test.mat),
+    published with Rasmussen & Williams, "Gaussian Processes for Machine
+    Learning" (MIT Press, 2006), is downloaded at run time from
+    https://gaussianprocess.org/gpml/data/ and is git-ignored. Its own terms
+    apply; nothing here grants rights to redistribute it.
+  * The `.agents/*/SKILL*.md` files carry Apache-2.0 in their front matter,
+    which is compatible with the Apache half of this dual licence.
