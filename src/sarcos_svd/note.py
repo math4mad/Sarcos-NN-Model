@@ -60,7 +60,9 @@ records = [json.loads(p.read_text()) for p in sorted((RES / "runs").glob("*/run.
 rows = summary["rows"]
 
 CANON = "21-64-64-7"
-ARCH_ORDER = [CANON, "21-32-7", "21-64-7", "21-64-64-64-7", "21-128-128-7"]
+SELECTED = "21-256-256-7"
+ARCH_ORDER = [CANON, "21-32-7", "21-64-7", "21-64-64-64-7", "21-128-128-7",
+              "21-128-7", "21-128-128-128-7", SELECTED]
 BANDS = ["leading", "middle", "trailing"]
 
 
@@ -298,6 +300,73 @@ gt(l2, caption="Layer 2 is 7×64: seven singular directions, so targets above ~0
 
 ![Layer 2 iso-energy: the leading curve sits above middle and trailing.](../results/plots/PLOT_L2)
 
+# Replicated on the selected model, with 8 seeds
+
+The inversion above is 3 seeds on a layer with 7 directions, which is thin. It was re-run properly: the model selected on validation (next section), 8 seeds, and a dense energy grid.
+
+```{python}
+sel = "21-256-256-7"
+rep = []
+for t in (0.3, 0.5):
+    row = {"energy target": t}
+    for b in BANDS:
+        r = one("post-hoc-truncation-isoenergy", arch=sel, layer=2, band=b, target=t)
+        row[b] = r["mse_test_mean"]
+        row[f"{b} range"] = f"{r['mse_test_min']:.3f}–{r['mse_test_max']:.3f}"
+        row[f"{b} rank/E"] = f"r{r['rank_rung']} / {r['energy_mean']:.3f}"
+    rep.append(row)
+rep_df = pd.DataFrame(rep)
+cols = ["energy target"] + [c for b in BANDS for c in (b, f"{b} rank/E", f"{b} range")]
+gt(rep_df[cols], caption=f"Read-out layer (7×256) of the selected model, truncated alone, bands matched by its own energy, mean of 8 seeds (seeds 13–20; the selected model scores {one('full-rank baseline (trained)', arch=sel)['mse_test_mean']:.4f} untruncated). The leading and middle per-seed ranges do not overlap at either energy, and leading is scored at slightly *higher* achieved energy than middle and still loses.") \
+    .fmt_number(columns=["energy target", "leading", "middle", "trailing"], decimals=3)
+```
+
+The control that makes the effect specific rather than general: the same sweep on the **256×256 hidden layer** of the same nets, where there are many directions and the usual ordering reappears.
+
+```{python}
+hid = pd.DataFrame([
+    {
+        "energy target": t,
+        "leading": one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="leading", target=t)["mse_test_mean"],
+        "leading rank": one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="leading", target=t)["rank_rung"],
+        "middle": one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="middle", target=t)["mse_test_mean"],
+        "middle rank": one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="middle", target=t)["rank_rung"],
+        "middle achieved E": one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="middle", target=t)["energy_mean"],
+        "middle matched?": "yes" if abs(one("post-hoc-truncation-isoenergy", arch=sel, layer=1, band="middle", target=t)["energy_mean"] - t) <= 0.1 * t else "NO: ladder-limited",
+    }
+    for t in (0.3, 0.5, 0.7)
+])
+gt(hid, caption="Hidden 256×256 layer, same 8 seeds. Leading at E=0.5 costs 0.110; the bulk cannot reach E=0.5 at all — its best match inside the searched ladder (rank ≤ 128 of 256) is E=0.213 at a cost of 0.997, and the last column flags exactly that: the middle rows at E=0.5 and E=0.7 are the same truncation, not two matched comparisons. The trailing band is worse still: 128 of the smallest directions hold about 5% of the energy, so its rows are ladder-limited rather than energy-matched and are reported as such rather than as a comparison.") \
+    .fmt_number(columns=["leading", "middle", "middle achieved E"], decimals=3)
+```
+
+# Model selection, on validation only
+
+Eight shapes, same split, optimiser, budget and seeds. Selection reads the validation column exclusively; test is shown once and was never an input to the choice.
+
+```{python}
+import statistics
+sel_rows = []
+for arch in ARCH_ORDER:
+    rs = [r for r in records if arch_of(r) == arch and r["regime"] == "trained-unconstrained"
+          and r["split"]["block_size"] == 256 and r["config"]["train"]["epochs"] == 60]
+    if not rs:
+        continue
+    val = [r["metrics"]["val"]["mse_normalized"] for r in rs]
+    sel_rows.append({
+        "architecture": arch + ("  ← selected" if arch == SELECTED else ""),
+        "params": rs[0]["n_params"],
+        "seeds": len(rs),
+        "val MSE (norm.)": statistics.fmean(val),
+        "val range": f"{min(val):.5f}–{max(val):.5f}",
+        "test MSE (norm.)": statistics.fmean(r["metrics"]["test"]["mse_normalized"] for r in rs),
+    })
+sel_df = pd.DataFrame(sel_rows).sort_values("val MSE (norm.)")
+gt(sel_df, caption="Validation orders the candidates monotonically by capacity — nothing overfits at this scale — so the largest cheaply-affordable net wins. The decision itself used seeds 13–15, the same three for every row; the winner is shown with all 8 seeds because it was run further for the follow-up above. The band conclusions are unchanged by the choice; the seed spread at the selected model is test 0.0161, sd 0.0021, range 0.0133–0.0196 over 8 seeds.") \
+    .fmt_number(columns=["val MSE (norm.)", "test MSE (norm.)"], decimals=5) \
+    .fmt_number(columns=["params"], decimals=0, use_seps=True)
+```
+
 # Robust across shapes
 
 ```{python}
@@ -397,9 +466,13 @@ What the study adds beyond the headline:
 3. **Post-hoc truncation and constrained training must not share a table row.** They
    differ by up to an order of magnitude at the same rank.
 
-Open next: the read-out-layer inversion (more seeds, and a wider final layer so there
-are more than 7 directions to match over), and whether it survives in architectures
-where "band" is a less innocent notion than it is for a 2-D `Linear`.
+The inversion is now replicated (8 seeds, selected model) but still unexplained:
+nothing here says *why* the top singular direction of the read-out map is the one
+you can afford to drop. Note that "more directions" is not obtainable there — the
+read-out is 7×width, so it has at most 7 singular directions because there are only
+7 torques. Next: a mechanistic look (which joint's torque lives in which direction),
+dropout/regularisation, and whether any of this survives architectures where "band"
+is a less innocent notion than it is for a 2-D `Linear`.
 
 # Reproducing this note
 
@@ -432,16 +505,22 @@ python -m sarcos_svd.note && quarto render notes/results.qmd
 
 
 def plot_names() -> dict[str, str]:
-    """Point the figure placeholders at the newest plots for the canonical run."""
+    """Point the figure placeholders at the canonical run's plots (the sections that
+    embed them are computed from the canonical 21-64-64-7 net, so the filenames must
+    not drift to whichever architecture was swept last)."""
     plots = REPO_ROOT / "results" / "plots"
-    newest = lambda pattern: (sorted(plots.glob(pattern)) or [None])[-1]
 
-    out = {
+    def newest(pattern: str) -> str:
+        hits = sorted(plots.glob(pattern), key=lambda p: p.stat().st_mtime)
+        preferred = [h for h in hits if h.name.startswith("full-64h64-")]
+        chosen = (preferred or hits)[-1] if (preferred or hits) else None
+        return chosen.name if chosen else "MISSING-run-evaluate-with---plot-first.png"
+
+    return {
         "PLOT_ALL": newest("*_Lall.png"),
         "PLOT_LAYERS": newest("*_L0-1-2.png"),
         "PLOT_L2": newest("*_Liso-2.png"),
     }
-    return {k: (v.name if v else "MISSING-run-evaluate---plot-first.png") for k, v in out.items()}
 
 
 def render() -> str:

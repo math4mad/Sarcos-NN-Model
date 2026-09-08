@@ -168,10 +168,10 @@ Full per-joint numbers, per-layer energies and the JSON for every cell are in
 
 ### Architecture robustness
 
-Same canonical split, optimiser and 3 seeds; only the shape changes (columns
-identical to the table above, whole net truncated at one uniform rank rung).
-The narrow nets have full rank below rung 32, so their last rung is closer to
-untruncated by construction.
+Same canonical split, optimiser and seeds (13, 14, 15); only the shape changes.
+"Rank" is the highest swept rung that is still **below full rank** for that net —
+narrow nets reach full rank at a small rung, so absolute ranks are not comparable
+across rows, only within one.
 
 | Model | Rank | Band | Test MSE | Retained energy |
 | ----- | ---- | ---- | -------- | --------------- |
@@ -183,6 +183,10 @@ untruncated by construction.
 | ‑ ‑, truncated | 16 | leading | 0.0854 | 0.959 |
 | ‑ ‑ | 16 | middle | 0.4318 | 0.767 |
 | ‑ ‑ | 16 | trailing | 0.8247 | 0.610 |
+| MLP 21-128-7 (1 hidden, 3,719 params), baseline | full (21/7) | — | 0.0260 (0.0220–0.0303) | 1.000 |
+| ‑ ‑, truncated | 16 | leading | 0.1211 | 0.920 |
+| ‑ ‑ | 16 | middle | 0.3643 | 0.779 |
+| ‑ ‑ | 16 | trailing | 0.8146 | 0.636 |
 | MLP 21-64-64-7 (canonical, 6,023 params), baseline | full (64/64/7) | — | 0.0250 (0.0216–0.0285) | 1.000 |
 | ‑ ‑, truncated | 32 | leading | 0.0455 | 0.957 |
 | ‑ ‑ | 32 | middle | 1.0397 | 0.596 |
@@ -195,6 +199,73 @@ untruncated by construction.
 | ‑ ‑, truncated | 64 | leading | 0.0258 | 0.960 |
 | ‑ ‑ | 64 | middle | 1.0645 | 0.522 |
 | ‑ ‑ | 64 | trailing | 1.0729 | 0.402 |
+| MLP 21-128-128-128-7 (3 hidden, 36,743 params), baseline | full | — | 0.0183 (0.0151–0.0215) | 1.000 |
+| ‑ ‑, truncated | 64 | leading | 0.0307 | 0.951 |
+| ‑ ‑ | 64 | middle | 1.0607 | 0.415 |
+| ‑ ‑ | 64 | trailing | 1.0582 | 0.281 |
+
+### Model selection, on validation only
+
+Eight shapes, same split / optimiser / budget / seeds (13, 14, 15). Selection uses
+the **validation** column exclusively; test is shown once, for completeness, and
+was not an input to the choice (AGENTS.md rule 2).
+
+| architecture | params | val MSE (norm.) | val range | test MSE (norm.) |
+| ------------ | ------ | --------------- | --------- | ---------------- |
+| **21-256-256-7 (selected)** | 73,223 | **0.01601** | 0.01339–0.01796 | 0.01643 |
+| 21-128-128-128-7 | 36,743 | 0.01877 | 0.01529–0.02211 | 0.01826 |
+| 21-128-128-7 | 20,231 | 0.01943 | 0.01596–0.02342 | 0.01935 |
+| 21-64-64-64-7 | 10,183 | 0.02510 | 0.02023–0.03065 | 0.02416 |
+| 21-64-64-7 (previous canonical) | 6,023 | 0.02581 | 0.02105–0.03172 | 0.02497 |
+| 21-128-7 | 3,719 | 0.02624 | 0.02050–0.03320 | 0.02605 |
+| 21-64-7 | 1,863 | 0.03171 | 0.02350–0.04072 | 0.03105 |
+| 21-32-7 | 935 | 0.04131 | 0.03186–0.05223 | 0.04117 |
+
+Validation orders the candidates monotonically by capacity — nothing overfits at
+this scale — so **21-256-256-7** is the selected model. The decision used seeds
+13–15 only, identically for every row; the winner was then run on seeds 13–20 for
+the read-out follow-up below (8-seed val 0.01648, range 0.01339–0.01934; test
+0.01605, sd 0.0021, range 0.0133–0.0196). The band conclusions are unchanged by
+the choice.
+
+| Model | Rank | Band | Test MSE | Retained energy |
+| ----- | ---- | ---- | -------- | --------------- |
+| MLP 21-256-256-7, selected on validation, 8 seeds, baseline | full | — | 0.0161 (0.0133–0.0196) | 1.000 |
+| ‑ ‑, truncated | 128 | leading | 0.0177 | 0.962 |
+| ‑ ‑ | 64 | leading | 0.0332 | 0.842 |
+| ‑ ‑ | 32 | leading | 0.0876 | 0.693 |
+| ‑ ‑ | 16 | leading | 0.4159 | 0.522 |
+| ‑ ‑ | 128 | middle | 0.9974 | 0.433 |
+| ‑ ‑ | 128 | trailing | 0.9880 | 0.318 |
+
+At rank 1–4 even the *leading* band is worse than the constant predictor (1.023 at
+rank 1): a rank-1 bottleneck in a 256-dimensional layer does not merely lose
+information, it mispredicts.
+
+### The read-out inversion, replicated (8 seeds, selected model)
+
+The 7×256 read-out map truncated alone, bands matched by *its own* energy:
+
+| E target | leading | middle | trailing |
+| -------- | ------- | ------ | -------- |
+| 0.3 | 0.811 (r1, E0.361) | **0.433** (r2–3, E0.348) [0.356–0.591] | 0.480 (r4–5, E0.388) |
+| 0.5 | 0.631 (r2, E0.553) | **0.233** (r4, E0.550) [0.188–0.282] | 0.183 (r6, E0.639) |
+| 0.7 | 0.286 (r3–4, E0.755) | 0.040 (r6, E0.962) | 0.016 (r7 = full rank) |
+
+The inversion is no longer a 3-seed curiosity: at E≈0.35 the per-seed ranges of
+leading (0.613–1.058) and middle (0.356–0.591) **do not overlap**, and the same
+holds at E≈0.55 (0.461–0.824 vs 0.188–0.282). Note that leading is scored at
+*higher* achieved energy (0.361 vs 0.348) and still loses.
+
+The same sweep on the 256×256 hidden layer shows the opposite and is the more
+important control: leading at E=0.5 scores 0.110 while middle at its best reachable
+match (E=0.213, rank 121–123 of 256) scores 0.997. Two caveats, both honest:
+the bulk and tail of that layer simply do not hold much energy — **middle and
+trailing cannot reach E ≥ 0.3 within rank 128**, so their rows are ladder-limited,
+not matched — and the read-out layer can never have more than 7 directions, because
+there are only 7 torques. (An earlier draft of this note suggested "a wider final
+layer so there are more directions to match over"; that is impossible. The fix was
+more seeds, which is what was run.)
 
 ### Bands at matched energy, one layer at a time (canonical net)
 
@@ -246,24 +317,27 @@ everywhere else (`_Liso-0.png`, `_Liso-1.png`, `_Lall.png`).
    indistinguishable everywhere** — they are simply "not the top directions".
    The clean ordering leading < middle < trailing only appears in the flat input
    layer at mid energies (E0.5: 0.570 / 0.665 / 0.726).
-4. **The band inversion lives in the read-out layer.** For layer 2 (7×64) at
-   matched energy 0.5, *middle* scores **0.242** and *trailing* **0.204** while
-   *leading* scores 0.605; at 0.3 it is 0.537 / 0.590 / 0.879. So for the 7-output
-   read-out map the dominant singular direction is the *worst* one to keep — the
-   only place the README's "middle matters most" survives, and the strongest
-   reason to run a dedicated follow-up. Caveat: 7 directions means coarse energy
-   matching, and the effect is seen at 2 energy targets on 3 seeds.
+4. **The band inversion lives in the read-out layer — and it replicated.** For the
+   7×256 read-out map of the selected net, at matched energy 0.5, *middle* scores
+   **0.233** and *trailing* **0.183** while *leading* scores **0.631**; at 0.35 it is
+   0.433 / 0.480 / 0.811 with **non-overlapping per-seed ranges** across 8 seeds.
+   So for the read-out map the dominant singular direction is the *worst* one to
+   keep — the only surviving part of the original hypothesis, now with replication.
+   The neighbouring control (the 256×256 hidden layer) shows the usual ordering, so
+   the effect is specific to the layer that faces the targets.
 5. **Step 5 sanity check: no — the ordering is the other way.** Training *under*
    a rank constraint beats truncating a trained net at the same rank by a wide
    margin: rank 1 → 0.526 vs 1.044; rank 4 → 0.117 vs 1.080; rank 16 → 0.030 vs
    0.175. A net that never had the capacity finds a usable low-rank solution; a
    net that had it and lost it does not.
 6. **"Leading wins, middle/trailing die" holds across shapes, and gets worse with
-   depth.** Across 1-, 2- and 3-hidden-layer nets (table above), the leading band
-   always recovers towards baseline while middle/trailing sit at ≈1.05 once the
-   truncation is applied to more than one layer. The 1-hidden-layer nets are the
-   partial exception (middle 0.42, trailing 0.89 at rung 16), i.e. a single
-   band-truncated bottleneck is partly recoverable whereas stacked ones are not.
+   depth.** Across eight shapes (1, 2 and 3 hidden layers; 32–256 wide; 935 →
+   73,223 params) the leading band always recovers towards baseline while
+   middle/trailing sit at ≈1.05 once the truncation is applied to more than one
+   layer. The 1-hidden-layer nets are the partial exception (middle 0.42, trailing
+   0.89 at rung 16), i.e. a single band-truncated bottleneck is partly recoverable
+   whereas stacked ones are not. In the selected 21-256-256-7 net even the leading
+   band is *worse than the constant predictor* at rank 1–4 (1.023 at rank 1).
 7. **Required rank grows with width, not with damage.** 21-128-128-7 needs rung 64
    to reach 0.96 energy and 0.0258 (vs its 0.0193 baseline), where the canonical
    64-wide net needs 32 — so rank must be reported *relative to layer width*, and
@@ -293,20 +367,20 @@ everywhere else (`_Liso-0.png`, `_Liso-1.png`, `_Lall.png`).
 
 ## Status
 
-Phase 3 done: the scaffold and the first study are committed (`cda705b`), and the
-headline result — **the leading singular band carries the learning effect; middle
+Phase 4 done: the study now has a **model selected on validation** (8 shapes
+compared; 21-256-256-7 wins, 73,223 params) and the read-out-layer inversion has
+been **replicated at 8 seeds** with non-overlapping per-seed ranges. Headline
+result unchanged: **the leading singular band carries the learning effect; middle
 and trailing are indistinguishable and both fatal; retained energy does not
-predict function** — now rests on 5 architectures × 3 seeds rather than one net.
-The same numbers are presented as a rendered Quarto note (`python -m sarcos_svd.note
-&& quarto render notes/results.qmd`), whose tables are generated from the run
-artifacts rather than typed by hand. `data/` and `results/` stay git-ignored, so a
-clean checkout needs `python -m sarcos_svd.data --fetch`.
+predict function** — with the read-out layer as the single, now better-supported
+exception. Results are also presented as a rendered Quarto note
+(`python -m sarcos_svd.note && quarto render notes/results.qmd`), whose tables are
+generated from the run artifacts rather than typed by hand. `data/` and `results/`
+stay git-ignored, so a clean checkout needs `python -m sarcos_svd.data --fetch`.
 
-Still open: the layer-2 middle-band inversion (only 7 directions to work with, so
-energy matching is coarse — needs a dedicated run with more seeds and a wider
-read-out), the fact that no architecture was *chosen* on validation for the study
-(all 5 are reported, none is "the" model), dropout/regularisation untouched, and
-no licence has been chosen.
+Still open: dropout/regularisation untouched; the read-out inversion is
+replicated but unexplained (nothing here says *why* the top direction of the
+7×256 map is the one you can afford to drop); and no licence has been chosen.
 
 ## License
 
