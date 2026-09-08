@@ -11,7 +11,7 @@ metadata:
   tags: ["neural network","paramters matrix"]
 ---
 
-# quarto 
+
 
 ## Overview
 

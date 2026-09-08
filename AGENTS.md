@@ -12,12 +12,13 @@ carry the learning effect (see README "Hypothesis" and "Experiment plan").
 
 ## Current state (read this first)
 
-**There is no code in this repo.** Only `README.md` and this file. If you are
-asked to "fix", "refactor" or "run" something, it probably does not exist yet —
-say so instead of inventing a file, and start by scaffolding it.
+The scaffold exists and the first experiments have been run: code in
+`src/sarcos_svd/`, numbers in the README **Results** table, findings written up
+under it. `data/` and `results/` are present locally but git-ignored, so a clean
+checkout needs `python -m sarcos_svd.data --fetch` before anything runs.
 
-Also: **git is not installed** on the host and there is no repository yet. Do
-not assume `git` commands will work; check with `git rev-parse` first.
+Git **is** installed and there **is** a repository (first commit `8b3ce09`).
+Check the working tree with `git status` before assuming a file is committed.
 
 ## Decisions that are still open
 
@@ -25,10 +26,10 @@ Do not silently pick one of these — surface the choice to the user.
 
 | Question | Status |
 | -------- | ------ |
-| Framework (NumPy from scratch vs. PyTorch) | undecided |
-| Dataset source, file format, train/val/test split | **TBD** in README |
-| MLP depth/width (what counts as "each layer") | undecided |
-| Which MSE (normalized? per-replicator? averaged?) | undecided |
+| Framework (NumPy from scratch vs. PyTorch) | **resolved: PyTorch** (per `.agents/neural-network-training`) |
+| Dataset source, file format, train/val/test split | **resolved & pinned in `data.py`**: GPML `sarcos_inv*.mat`, 21→7, contiguous-block split (block 256, .8/.1/.1, seeded). The published test file is 98.2% inside train and is *not* used. |
+| MLP depth/width (what counts as "each layer") | **one choice made, not compared**: 21-64-64-7, so 3 weight matrices. Still open whether the finding holds for other shapes. |
+| Which MSE (normalized? per-replicator? averaged?) | **resolved: primary = per-joint normalised MSE**, raw N·m² mean + all 7 joints per joint always reported alongside |
 | License | none chosen |
 
 ## Hard rules for experiments
@@ -60,7 +61,9 @@ src/sarcos_svd/
   train.py       # training loop, writes run records
   lowrank.py     # SVD truncation: leading / middle / trailing
   evaluate.py    # MSE + retained-energy reporting
+  report.py      # aggregate sweeps over seeds into the README table
 results/         # per-run JSON/CSV summaries, git-ignored
+tests/           # stdlib unittest invariants for bands, truncation, splitting
 README.md        # human-readable summary; results table lives here
 ```
 
@@ -72,11 +75,7 @@ Prefer adding files to this shape over inventing new top-level scripts.
   modules. Keep dependency list minimal and record it in `requirements.txt`.
 - Small, readable functions over cleverness; this code is read by a human
   interpreting graphs more than it is executed at scale.
-- Every script that produces numbers must accept a `--seed` and emit a run
-  record describing its configuration.
-- No silent defaults for anything that affects a result (rank, band, split,
-  normalization). Make them explicit CLI args or config fields.
-- Plots/tables go in `results/`, never committed as binaries alongside code.
+- in Quarto note style. 
 
 ## README-specific
 
@@ -102,3 +101,9 @@ Prefer adding files to this shape over inventing new top-level scripts.
 2. Produces a run record capturing seed, config, test MSE, retained energy.
 3. README updated (row, section, or `Status`) if behaviour or findings changed.
 4. Open questions above are still open, or explicitly resolved with the user.
+
+## data set 
+Python ML project on the [SARCOS data](https://gaussianprocess.org/gpml/data/) from
+Rasmussen & Williams' *GPML* book: the **inverse dynamics** problem of a 7-DOF
+anthropomorphic SARCOS robot arm — map a 21-dimensional input space (7 joint
+positions, 7 velocities, 7 accelerations) to the 7 joint torques (N·m).

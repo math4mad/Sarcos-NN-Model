@@ -1,0 +1,6 @@
+# Pinned to what was resolved and verified on this host
+# (macOS 26.1 arm64, CPython 3.14.7). torch 2.14.0 ships cp314 macosx_14_0_arm64 wheels.
+numpy==2.5.3
+scipy==1.18.1
+torch==2.14.0
+matplotlib==3.11.1

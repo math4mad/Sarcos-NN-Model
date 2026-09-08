@@ -1,0 +1,10 @@
+# data is licensed via the GPML book and must not be redistributed
+data/
+results/
+
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+*.egg-info/
