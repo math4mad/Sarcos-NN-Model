@@ -206,6 +206,10 @@ seeds and the achieved energy are in brackets — every cell is one row of
 
 Layer 2 has only 7 directions, so targets above 0.5 are reachable only at rank 6–7
 (i.e. essentially untruncated) and are omitted rather than reported as a result.
+
+Figure: `results/plots/<run_id>_Liso-2.png` is that table drawn out — the leading
+curve sits *above* middle and trailing in the read-out layer, and below them
+everywhere else (`_Liso-0.png`, `_Liso-1.png`, `_Lall.png`).
 ### Findings
 
 1. **The leading band carries the learning effect.** Post-hoc truncation of the
