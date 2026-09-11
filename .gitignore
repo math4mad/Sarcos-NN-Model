@@ -12,7 +12,8 @@ __pycache__/
 .DS_Store
 
 # rendered output: the site lives on the gh-pages branch, not next to the code
-docs/
+docs/*
+!docs/LETTERS/
 .quarto/
 **/*.quarto_ipynb
 notes/results.html
