@@ -218,6 +218,80 @@ def to_markdown(agg: list[dict], cols: list[str]) -> str:
     return "\n".join(lines)
 
 
+def _base_reference(runs: list[Path]) -> dict[tuple[str, int], dict]:
+    """(arch, seed) -> the frozen base's shift metrics, from `shift_eval.json`."""
+    ref: dict[tuple[str, int], dict] = {}
+    for record_path in runs:
+        eval_path = record_path.parent / "shift_eval.json"
+        if not eval_path.exists():
+            continue
+        run = json.loads(record_path.read_text())
+        if run.get("task") not in (None, "canonical"):
+            continue
+        ref[(arch_label(run), run["seed"])] = json.loads(eval_path.read_text())["metrics"]
+    return ref
+
+
+def shift_rows(runs: list[Path]) -> list[dict]:
+    """The shifted-downstream arms, paired by seed against the frozen base.
+
+    Reads run records with `task == "shift"` plus the `shift_eval.json` written by
+    `evaluate --eval-task shift` for the bases. Reports both the downstream score
+    (did adaptation help?) and the in-distribution score (what did it cost?), because
+    an adapter that improves one by wrecking the other is not a success.
+    """
+    ref = _base_reference(runs)
+    out: list[dict] = []
+    for record_path in runs:
+        run = json.loads(record_path.read_text())
+        if run.get("task") != "shift":
+            continue
+        base_metrics = ref.get((arch_label(run), run["seed"]))
+        if base_metrics is None:
+            continue
+        if run["regime"] == "trained-lora-increment":
+            ranks = "/".join(str(x) for x in run["config"]["model"]["ranks"])
+            arm = f"LoRA increment rank {ranks}"
+            trainable = run.get("n_trainable_params")
+        elif run["regime"] == "trained-full-finetune":
+            arm = "full fine-tuning (all weights)"
+            trainable = run.get("n_trainable_params")
+        else:
+            arm = "retrained from scratch on the shift data"
+            trainable = run.get("n_trainable_params")
+        out.append(
+            {
+                "arm": arm,
+                "arch": arch_label(run),
+                "seed": run["seed"],
+                "trainable_params": trainable,
+                "downstream": run["metrics"]["shift_downstream"]["mse_normalized"],
+                "indistribution": run["metrics"]["shift_indistribution"]["mse_normalized"],
+                "base_downstream": base_metrics["downstream"]["mse_normalized"],
+                "base_indistribution": base_metrics["indistribution"]["mse_normalized"],
+            }
+        )
+    return out
+
+
+def frozen_base_rows(runs: list[Path]) -> list[dict]:
+    out = []
+    for (arch, seed), metrics in _base_reference(runs).items():
+        out.append(
+            {
+                "arm": "frozen base (no adaptation)",
+                "arch": arch,
+                "seed": seed,
+                "trainable_params": 0,
+                "downstream": metrics["downstream"]["mse_normalized"],
+                "indistribution": metrics["indistribution"]["mse_normalized"],
+                "base_downstream": metrics["downstream"]["mse_normalized"],
+                "base_indistribution": metrics["indistribution"]["mse_normalized"],
+            }
+        )
+    return out
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--runs", nargs="+", default=["results/runs/*/run.json"])
@@ -225,8 +299,41 @@ def main() -> None:
     p.add_argument("--out", default="results/summary.json")
     p.add_argument("--markdown", action="store_true")
     p.add_argument("--layer", default=None, help="filter to one layer key (all/0/1/2)")
+    p.add_argument("--shift", action="store_true", help="report the shifted-downstream adapter arms and exit")
     p.add_argument("--regime", default=None)
     args = p.parse_args()
+
+    if args.shift:
+        run_paths = _load_patterns(args.runs)
+        rows = frozen_base_rows(run_paths) + shift_rows(run_paths)
+        grouped: dict[tuple, list[dict]] = defaultdict(list)
+        for r in rows:
+            grouped[(r["arch"], r["arm"])].append(r)
+        table = []
+        for (arch, arm), part in grouped.items():
+            d = [p["downstream"] for p in part]
+            i = [p["indistribution"] for p in part]
+            table.append(
+                {
+                    "arch": arch,
+                    "arm": arm,
+                    "seeds": len(part),
+                    "trainable": part[0]["trainable_params"],
+                    "downstream": round(statistics.fmean(d), 5),
+                    "downstream_vs_base": round(statistics.fmean(x["downstream"] - x["base_downstream"] for x in part), 5),
+                    "indistribution": round(statistics.fmean(i), 5),
+                    "indistribution_vs_base": round(statistics.fmean(x["indistribution"] - x["base_indistribution"] for x in part), 5),
+                }
+            )
+        table.sort(key=lambda e: (e["arch"], e["downstream"]))
+        out = Path(args.out).with_name("shift_summary.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"rows": table}, indent=2))
+        print(f"{len(rows)} arm-runs -> {out}\n")
+        cols = ["arch", "arm", "seeds", "trainable", "downstream", "downstream_vs_base",
+                "indistribution", "indistribution_vs_base"]
+        print(to_markdown(table, cols))
+        return
 
     records, rows, swept_run_ids = collect(_load_patterns(args.runs), _load_patterns(args.sweeps))
     rows += add_baseline_rows(records, swept_run_ids)

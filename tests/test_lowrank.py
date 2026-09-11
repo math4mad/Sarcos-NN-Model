@@ -9,9 +9,12 @@ every number in the README means nothing.
 from __future__ import annotations
 
 import unittest
+from pathlib import Path
 
 import numpy as np
 import torch
+
+REPO = Path(__file__).resolve().parents[1]
 
 from sarcos_svd import lowrank
 from sarcos_svd.data import SplitConfig, block_split
@@ -169,6 +172,35 @@ class TestDeltaBands(unittest.TestCase):
         self.assertGreater(lead4["delta_retained_energy"], 0.999)
         self.assertTrue(0.4 < lead2["delta_retained_energy"] < 1.0)
         self.assertLess(tail2["delta_retained_energy"], 1e-6)
+
+
+class TestShiftTask(unittest.TestCase):
+    """The downstream task must be a *partition* with no contact between what an arm
+    fits and what it is scored on - otherwise 'adaptation helped' is leakage."""
+
+    def test_nn_distance_matches_a_brute_force_loop(self):
+        from sarcos_svd.data import _nn_distance
+
+        rng = np.random.default_rng(4)
+        a, b = rng.normal(size=(7, 3)), rng.normal(size=(11, 3))
+        got = _nn_distance(a, b, chunk=3)
+        want = np.array([np.min(np.linalg.norm(b - row, axis=1)) for row in a])
+        self.assertTrue(np.allclose(got, want))
+
+    def test_partitions_are_disjoint_and_cover_the_test_blocks(self):
+        from sarcos_svd.data import ShiftConfig, shift_task
+
+        mat = REPO / "data" / "sarcos_inv.mat"
+        if not mat.exists():
+            self.skipTest("data/ not fetched")
+        cfg = ShiftConfig(seed=13, block_size=256, train_frac=0.8, val_frac=0.1, test_frac=0.1)
+        task = shift_task(cfg, REPO / "data")
+        fit, sel = set(task["fit"].tolist()), set(task["select"].tolist())
+        down, indist = set(task["eval_downstream"].tolist()), set(task["eval_indistribution"].tolist())
+        self.assertTrue(fit.isdisjoint(sel))
+        self.assertTrue(down.isdisjoint(indist))
+        self.assertEqual(len(down | indist), 4608)  # the whole test blocks, no row dropped
+        self.assertTrue(fit.isdisjoint(down | indist))  # never fit on what is scored
 
 
 class TestModelConfig(unittest.TestCase):

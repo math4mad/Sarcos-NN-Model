@@ -84,23 +84,42 @@ def score_state(
     state: dict[str, np.ndarray],
     tensors: dict[str, np.ndarray],
     seed: int,
+    extra_splits: dict[str, np.ndarray] | None = None,
 ) -> dict:
-    """Load a (possibly truncated) state into a fresh copy of the architecture and score it."""
+    """Load a (possibly truncated) state into a fresh copy of the architecture and score it.
+
+    `extra_splits` adds named index arrays beyond val/test — used by the downstream
+    task so the same state can be scored on the shifted and in-distribution slices.
+    """
     model = model_from_config(cfg, seed)
     torch_state = {k: torch.as_tensor(v, dtype=torch.float32) for k, v in state.items()}
     incompatible = model.load_state_dict(torch_state, strict=True)
     if incompatible.missing_keys or incompatible.unexpected_keys:  # pragma: no cover
         raise RuntimeError(f"state mismatch: {incompatible}")
 
+    splits = {"val": tensors["val_idx"], "test": tensors["test_idx"]}
+    if extra_splits:
+        splits.update(extra_splits)
     out = {}
-    for split in ("val", "test"):
-        idx = f"{split}_idx"
-        pred_std = predict(model, tensors["x"][tensors[idx]])
+    for name, idx in splits.items():
+        pred_std = predict(model, tensors["x"][idx])
         pred_raw = inverse_standardise(pred_std, tensors["stats"])
-        out[split] = prediction_metrics(
-            tensors["y_raw"][tensors[idx]], pred_raw, np.asarray(tensors["stats"]["y_var"])
+        out[name] = prediction_metrics(
+            tensors["y_raw"][idx], pred_raw, np.asarray(tensors["stats"]["y_var"])
         )
     return out
+
+
+def shift_task_for(run: dict):
+    """The downstream task matching a run's recorded canonical split."""
+    from .data import ShiftConfig, shift_task
+
+    sc = run["split"]
+    cfg = ShiftConfig(
+        seed=sc["seed"], block_size=sc["block_size"], train_frac=sc["train_frac"],
+        val_frac=sc["val_frac"], test_frac=sc["test_frac"],
+    )
+    return shift_task(cfg, run["config"].get("data_dir"))
 
 
 def load_tensors(run: dict) -> dict:
@@ -407,6 +426,7 @@ def main() -> None:
     g.add_argument("--single", nargs=2, metavar=("BAND", "RANK"), help="evaluate one truncation")
     g.add_argument("--delta-sweep", help="same ladder, on dW = W_trained - W_init (LoRA's object)")
     g.add_argument("--delta-spectra", action="store_true", help="report the rank/energy profile of dW and exit")
+    g.add_argument("--eval-task", choices=("shift",), help="score this run's state on the shifted downstream task")
     g.add_argument("--baseline", action="store_true", help="re-score the untruncated run (sanity check)")
     p.add_argument("--bands", default=",".join(lowrank.BANDS), help="comma list subset of leading,middle,trailing")
     p.add_argument(
@@ -441,6 +461,19 @@ def main() -> None:
         same = np.allclose(recheck["test"]["mse_raw_mean"], run["metrics"]["test"]["mse_raw_mean"], rtol=1e-6)
         print(json.dumps(recheck, indent=2))
         print(f"re-score matches the training-time record: {same}")
+        return
+
+    if args.eval_task == "shift":
+        task = shift_task_for(run)
+        cfg = config_of(run)
+        tensors = load_tensors(run)
+        state = state_of(run, run_path)
+        extra = {"downstream": task["eval_downstream"], "indistribution": task["eval_indistribution"]}
+        out = score_state(cfg, state, tensors, run["seed"], extra_splits=extra)
+        blob = {"run_id": run["run_id"], "task": task["meta"], "metrics": out}
+        (run_path.parent / "shift_eval.json").write_text(json.dumps(blob, indent=2))
+        print(json.dumps(out, indent=2))
+        print(f"\nwrote {run_path.parent / 'shift_eval.json'}")
         return
 
     if args.delta_spectra:

@@ -271,11 +271,135 @@ def check_split_hygiene(data: SarcosData) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# A shifted *downstream* task, built only from rows we already have.
+#
+# LoRA's evidence comes from fine-tuning a converged model on data it was not
+# trained on. Our canonical split has no such gap: the val blocks are drawn from
+# the same region of trajectory space as the train blocks, so "fine-tuning" on them
+# can only overwrite what the base already knows (measured: frozen 0.0161 beat full
+# fine-tuning 0.0178). To get a task where adaptation can actually help, we rank the
+# held-out rows by how far each one is, in input space, from the nearest training
+# row - i.e. covariate shift towards the edge of what the net has seen - and use the
+# far half of the val blocks as the downstream fit set and the far half of the test
+# blocks as its held-out evaluation. The near half of the test blocks stays the
+# in-distribution probe, so forgetting is measurable on the same run.
+# ---------------------------------------------------------------------------
+
+
+def _nn_distance(query: np.ndarray, reference: np.ndarray, chunk: int = 1024) -> np.ndarray:
+    """Distance from each query row to its nearest reference row (exact, Gram trick).
+
+    Uses ||a-b||^2 = ||a||^2 + ||b||^2 - 2ab' so the inner loop is one BLAS matmul per
+    chunk instead of a broadcast difference tensor; the naive form needs ~1 GB for our
+    sizes and is ~50x slower. Clipped at 0 because the algebraic identity is not exact
+    in floating point.
+    """
+    q = np.ascontiguousarray(query, dtype=np.float64)
+    r = np.ascontiguousarray(reference, dtype=np.float64)
+    r2 = (r * r).sum(1)
+    out = np.empty(len(q))
+    for start in range(0, len(q), chunk):
+        block = q[start : start + chunk]
+        d2 = (block * block).sum(1)[:, None] + r2[None, :] - 2.0 * (block @ r.T)
+        out[start : start + len(block)] = np.sqrt(np.maximum(d2, 0.0)).min(axis=1)
+    return out
+
+
+@dataclass(frozen=True)
+class ShiftConfig:
+    """The downstream task definition. Everything that changes it changes the result."""
+
+    seed: int
+    block_size: int
+    train_frac: float
+    val_frac: float
+    test_frac: float
+    far_frac: float = 0.5
+    fit_frac: float = 0.75
+    nn_chunk: int = 1024
+
+    def split(self) -> SplitConfig:
+        return SplitConfig(self.seed, self.block_size, self.train_frac, self.val_frac, self.test_frac)
+
+    def as_dict(self) -> dict:
+        return dataclasses.asdict(self)
+
+
+def shift_task(cfg: ShiftConfig, dirpath: str | Path | None = None) -> dict:
+    """Indices + provenance for the covariate-shifted downstream task.
+
+    Block-level, deliberately. The first version of this picked the farthest *rows*
+    of the val blocks as the fit set and the farthest rows of the test blocks as the
+    evaluation - but "far from train" is not one region: those are two different
+    places in input space, so an arm could only ever be damaged by the fit set, never
+    helped. Here the downstream **domain** is a set of whole blocks (the blocks whose
+    rows sit farthest from the training data), and fit/select/eval are different
+    blocks *of the same domain*. Then improvement can actually mean something.
+    """
+    data = load_split(cfg.split(), dirpath)
+    x, bs = data.x_raw, cfg.block_size
+    train = data.idx["train"]
+
+    def blocks_of(idx: np.ndarray) -> np.ndarray:
+        return np.unique(idx // bs)
+
+    def block_score(blocks: np.ndarray, idx: np.ndarray) -> dict[int, float]:
+        d = _nn_distance(x[idx], x[train])
+        owner = idx // bs
+        return {int(b): float(d[owner == b].mean()) for b in blocks}
+
+    val_blocks, test_blocks = blocks_of(data.idx["val"]), blocks_of(data.idx["test"])
+    vs = block_score(val_blocks, data.idx["val"])
+    ts = block_score(test_blocks, data.idx["test"])
+
+    def split_blocks(blocks, scores, keep):
+        ordered = sorted(blocks, key=lambda b: -scores[int(b)])
+        n = int(round(len(ordered) * keep))
+        return ordered[:n], ordered[n:]
+
+    far_val, near_val = split_blocks(val_blocks, vs, cfg.far_frac)
+    far_test, near_test = split_blocks(test_blocks, ts, cfg.far_frac)
+    perm = np.random.default_rng(cfg.seed + 2).permutation(len(far_val))
+    cut = int(round(len(far_val) * cfg.fit_frac))
+    fit_blocks = [int(far_val[i]) for i in perm[:cut]]
+    select_blocks = [int(far_val[i]) for i in perm[cut:]]
+    far_val = [int(b) for b in far_val]
+    far_test = [int(b) for b in far_test]
+    near_test = [int(b) for b in near_test]
+
+    def rows_of(blocks, pool):
+        if not blocks:
+            return np.array([], dtype=int)
+        mask = np.isin(pool // bs, blocks)
+        return np.sort(pool[mask])
+
+    fit = rows_of(fit_blocks, data.idx["val"])
+    select = rows_of(select_blocks, data.idx["val"])
+    down = rows_of(far_test, data.idx["test"])
+    indist = rows_of(near_test, data.idx["test"])
+    meta = {
+        "kind": "covariate-shift domain = whole blocks farthest from train, fit/eval split by block",
+        **cfg.as_dict(),
+        "val_block_distance_range": [round(min(vs.values()), 3), round(max(vs.values()), 3)],
+        "test_block_distance_range": [round(min(ts.values()), 3), round(max(ts.values()), 3)],
+        "far_test_block_distance_min": round(min(ts[b] for b in far_test), 4),
+        "near_test_block_distance_max": round(max(ts[b] for b in near_test), 4) if near_test else None,
+        "sizes": {"fit": int(len(fit)), "select": int(len(select)),
+                  "eval_downstream": int(len(down)), "eval_indistribution": int(len(indist))},
+        "blocks": {"fit": fit_blocks, "select": select_blocks,
+                   "eval_downstream": far_test, "eval_indistribution": near_test},
+    }
+    return {"fit": fit, "select": select, "eval_downstream": down, "eval_indistribution": indist,
+            "meta": meta}
+
+
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--fetch", action="store_true", help="download the GPML .mat files into data/")
     p.add_argument("--data-dir", default=None)
     p.add_argument("--report", action="store_true", help="print the leakage + split diagnostic JSON")
+    p.add_argument("--shift-task", action="store_true", help="print the downstream-task provenance JSON")
     p.add_argument("--seed", type=int, default=None, help="with --report: also print this split's manifest")
     p.add_argument("--block-size", type=int, default=None)
     p.add_argument("--fractions", type=float, nargs=3, default=None, metavar=("TRAIN", "VAL", "TEST"))
@@ -295,7 +419,15 @@ def main() -> None:
             )
             data = load_split(cfg, args.data_dir)
             print(json.dumps({"split": data.split_manifest, "hygiene": check_split_hygiene(data)}, indent=2))
-    if not (args.fetch or args.report):
+    if args.shift_task:
+        if not (args.seed and args.block_size and args.fractions):
+            raise SystemExit("--shift-task needs --seed, --block-size and --fractions")
+        scfg = ShiftConfig(
+            seed=args.seed, block_size=args.block_size, train_frac=args.fractions[0],
+            val_frac=args.fractions[1], test_frac=args.fractions[2],
+        )
+        print(json.dumps(shift_task(scfg, args.data_dir)["meta"], indent=2))
+    if not (args.fetch or args.report or args.shift_task):
         p.print_help()
 
 

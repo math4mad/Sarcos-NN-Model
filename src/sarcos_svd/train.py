@@ -26,7 +26,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from .data import SplitConfig, check_split_hygiene, fetch, load_split
+from .data import ShiftConfig, SplitConfig, check_split_hygiene, fetch, load_split, shift_task
 from .evaluate import PRIMARY_METRIC, inverse_standardise, prediction_metrics
 from .model import (
     ModelConfig,
@@ -65,7 +65,9 @@ def make_run_id(args: argparse.Namespace) -> str:
     ranks = "none" if args.ranks is None else "-".join(str(r) for r in args.ranks)
     tag = f"_{args.tag}" if args.tag else ""
     scale = "" if args.mode != "lora" else f"-s{str(args.lora_scale).rstrip('0').rstrip('.')}"
-    fit = "" if args.train_on == "train" else f"-fit{args.train_on}"
+    fit = "" if args.task == "shift" else ("" if args.train_on == "train" else f"-fit{args.train_on}")
+    if args.task == "shift":
+        fit = "-taskshift"
     warm = "" if args.warm_start is None else "-warm"
     frac = "-".join(str(int(round(f * 100))) for f in args.fractions)
     return (
@@ -76,6 +78,10 @@ def make_run_id(args: argparse.Namespace) -> str:
 
 def evaluate_split(model: torch.nn.Module, data, split: str) -> dict:
     idx = data.idx[split]
+    return evaluate_indices(model, data, idx)
+
+
+def evaluate_indices(model: torch.nn.Module, data, idx) -> dict:
     model.eval()
     with torch.no_grad():
         pred_std = model(torch.as_tensor(data.x[idx], dtype=torch.float32)).numpy()
@@ -96,6 +102,13 @@ def train(args: argparse.Namespace) -> dict:
         test_frac=args.fractions[2],
     )
     data = load_split(split_cfg, args.data_dir)
+    task = None
+    if args.task == "shift":
+        task = shift_task(
+            ShiftConfig(seed=args.seed, block_size=args.block_size, train_frac=args.fractions[0],
+                        val_frac=args.fractions[1], test_frac=args.fractions[2]),
+            args.data_dir,
+        )
     base_record, base_state = load_base(args)
     model_cfg = ModelConfig(
         in_dim=data.x.shape[1],
@@ -110,10 +123,12 @@ def train(args: argparse.Namespace) -> dict:
         model.load_state_dict({k: v.clone() for k, v in base_state.items()})
     init_state = numpy_state(model.state_dict())
     opt = torch.optim.Adam(trainable_params(model), lr=args.lr)
-    fit_split = args.train_on
-    select_split = "val" if fit_split == "train" else "train"
-    y = torch.as_tensor(data.y[data.idx[fit_split]], dtype=torch.float32)
-    x = torch.as_tensor(data.x[data.idx[fit_split]], dtype=torch.float32)
+    fit_split = "shift_fit" if task else "train"
+    select_split = "shift_select" if task else "val"
+    fit_idx = task["fit"] if task else data.idx["train"]
+    select_idx = task["select"] if task else data.idx["val"]
+    y = torch.as_tensor(data.y[fit_idx], dtype=torch.float32)
+    x = torch.as_tensor(data.x[fit_idx], dtype=torch.float32)
     n = x.shape[0]
     step_rng = np.random.default_rng(args.seed + 1)  # shuffling stream, separate from init
 
@@ -131,7 +146,7 @@ def train(args: argparse.Namespace) -> dict:
             opt.step()
             totals += loss.detach().item() * len(b)
             seen += len(b)
-        val = evaluate_split(model, data, select_split)
+        val = evaluate_indices(model, data, select_idx)
         history.append({"epoch": epoch, "train_loss_std_mse": totals / seen, "mse_val": val["mse_normalized"]})
         if val["mse_normalized"] < best["mse_val"]:
             best = {"mse_val": val["mse_normalized"], "epoch": epoch, "state": state_from_model(model)}
@@ -140,6 +155,9 @@ def train(args: argparse.Namespace) -> dict:
     model.load_state_dict({k: v.clone() for k, v in best["state"].items()})
     state = numpy_state(best["state"])
     metrics = {s: evaluate_split(model, data, s) for s in ("train", "val", "test")}
+    if task:
+        metrics["shift_downstream"] = evaluate_indices(model, data, task["eval_downstream"])
+        metrics["shift_indistribution"] = evaluate_indices(model, data, task["eval_indistribution"])
 
     run_id = args.run_id or make_run_id(args)
     out_dir = RESULTS_ROOT / "runs" / run_id
@@ -161,6 +179,8 @@ def train(args: argparse.Namespace) -> dict:
         "warm_start_run": None if args.warm_start is None else base_record["run_id"],
         "fit_split": fit_split,
         "selection_split": select_split,
+        "task": args.task,
+        "task_meta": None if task is None else task["meta"],
         "created_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "wall_seconds": round(time.time() - t0, 2),
         "seed": args.seed,
@@ -188,6 +208,10 @@ def train(args: argparse.Namespace) -> dict:
         "split_hygiene": check_split_hygiene(data),
         "artifacts": {"weights": weights_path.name, "weights_init": "weights_init.npz", "record": "run.json"},
         "n_params": model.n_params(),
+        # in lora mode the base is a buffer, so n_params already counts only the
+        # trainable increment; record the frozen side explicitly for the tables
+        "n_frozen_params": (None if args.mode != "lora" else sum(
+            int(np.prod(v.shape)) for k, v in base_state.items() if k.endswith(".weight"))),
         "n_trainable_params": sum(p.numel() for p in trainable_params(model)),
         "layer_shapes": [list(s) for s in model_cfg.layer_shapes],
         "metrics": metrics,
@@ -242,8 +266,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--base-run", default=None, help="run.json whose weights are FROZEN, --mode lora")
     p.add_argument("--warm-start", default=None, help="run.json to initialise from, all weights trainable")
     p.add_argument("--train-on", choices=("train", "val"), default="train",
-                   help="fit on the val blocks instead: a shifted downstream task for "
-                        "adapter experiments (selection then falls back to the train blocks)")
+                   help="fit on the val blocks instead: a no-shift adapter probe (selection "
+                        "then falls back to the train blocks)")
+    p.add_argument("--task", choices=("canonical", "shift"), default="canonical",
+                   help="'shift' = the covariate-shifted downstream task in data.shift_task "
+                        "(fit on the far val rows, report on far/near test rows)")
     p.add_argument("--lora-scale", type=float, default=1.0, help="scale of the LoRA increment (alpha/r style)")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -272,7 +299,7 @@ def main(argv: list[str] | None = None) -> None:
     record = train(args)
     print(json.dumps({k: record[k] for k in (
         "run_id", "regime", "frozen_base_run", "warm_start_run", "fit_split", "selection_split",
-        "seed", "split", "n_params", "n_trainable_params", "best_epoch", "metrics"
+        "task", "seed", "split", "n_params", "n_trainable_params", "best_epoch", "metrics"
     )}, indent=2))
     print(f"\nrun record: {RESULTS_ROOT / 'runs' / record['run_id'] / 'run.json'}")
 
