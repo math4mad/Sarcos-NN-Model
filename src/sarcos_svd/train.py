@@ -67,7 +67,9 @@ def make_run_id(args: argparse.Namespace) -> str:
     scale = "" if args.mode != "lora" else f"-s{str(args.lora_scale).rstrip('0').rstrip('.')}"
     fit = "" if args.task == "shift" else ("" if args.train_on == "train" else f"-fit{args.train_on}")
     if args.task == "shift":
-        fit = "-taskshift"
+        # the dose is part of the identity of a shift run: five far_frac cells must
+        # never land in one directory (Step 0, Letter 011)
+        fit = f"-taskshift-far{int(round(getattr(args, 'far_frac', 0.5) * 100))}"
     warm = "" if args.warm_start is None else "-warm"
     frac = "-".join(str(int(round(f * 100))) for f in args.fractions)
     return (
@@ -106,7 +108,8 @@ def train(args: argparse.Namespace) -> dict:
     if args.task == "shift":
         task = shift_task(
             ShiftConfig(seed=args.seed, block_size=args.block_size, train_frac=args.fractions[0],
-                        val_frac=args.fractions[1], test_frac=args.fractions[2]),
+                        val_frac=args.fractions[1], test_frac=args.fractions[2],
+                        far_frac=getattr(args, "far_frac", 0.5)),
             args.data_dir,
         )
     base_record, base_state = load_base(args)
@@ -271,6 +274,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--task", choices=("canonical", "shift"), default="canonical",
                    help="'shift' = the covariate-shifted downstream task in data.shift_task "
                         "(fit on the far val rows, report on far/near test rows)")
+    p.add_argument("--far-frac", dest="far_frac", type=float, default=0.5,
+                   help="Step 0 dose: fraction of the val/test blocks (ranked by NN-distance "
+                        "from train) that form the downstream domain. Default 0.5 = the value "
+                        "every previously recorded shift run used.")
     p.add_argument("--lora-scale", type=float, default=1.0, help="scale of the LoRA increment (alpha/r style)")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr", type=float, default=1e-3)
@@ -284,6 +291,8 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
+    if not 0.0 < args.far_frac <= 1.0:
+        raise SystemExit("--far-frac must be in (0, 1]")
     if args.mode in ("constrained", "lora") and args.ranks is None:
         raise SystemExit(f"--mode {args.mode} requires explicit --ranks (one per layer)")
     if args.mode == "full" and args.ranks is not None:
